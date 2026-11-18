@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+config.json
+logs/
+*.log
+*.jsonl
+state.json
+*.corrupt
+.idea/
+.vscode/
+.ruff_cache/
+.pytest_cache/

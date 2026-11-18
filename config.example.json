@@ -1,0 +1,112 @@
+{
+  "mode": "testnet",
+  "api": {
+    "key_env": "BINANCE_API_KEY",
+    "secret_env": "BINANCE_API_SECRET",
+    "recv_window_ms": 5000,
+    "base_url_testnet": "https://testnet.binancefuture.com",
+    "base_url_live": "https://fapi.binance.com",
+    "ws_testnet": "wss://fstream.binancefuture.com",
+    "ws_live": "wss://fstream.binance.com",
+    "timeout_s": 10.0,
+    "max_retries": 3
+  },
+  "market": {
+    "symbols": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "SOLUSDT",
+      "XRPUSDT",
+      "DOGEUSDT"
+    ],
+    "interval": "5m",
+    "warmup_bars": 1000,
+    "discovery": "top_volume",
+    "discovery_top_n": 5,
+    "discovery_refresh_s": 1800,
+    "discovery_quote_volume_min": 50000000.0,
+    "discovery_exclude": [],
+    "discovery_require_affordable": true
+  },
+  "strategy": {
+    "hi_lo_len": 34,
+    "fast_ema": 89,
+    "medium_ema": 200,
+    "slow_ema": 600,
+    "lookback": 3,
+    "filter_bw_fractals": false,
+    "use_ha": true,
+    "regime_slope_bars": 200,
+    "regime_min_slope_bps": 100.0
+  },
+  "risk": {
+    "risk_pct": 1.5,
+    "leverage": 10,
+    "margin_type": "ISOLATED",
+    "max_open_positions": 3,
+    "max_open_per_symbol": 1,
+    "max_notional_frac_equity": 1.0,
+    "min_notional_bump": true,
+    "max_bump_factor": 2.0,
+    "daily_loss_limit_pct": 5.0,
+    "sl_mode": "atr",
+    "atr_len": 14,
+    "sl_atr_mult": 5.0,
+    "sl_percent": 0.35,
+    "sl_min_bps": 8.0,
+    "sl_max_bps": 250.0,
+    "tp_rr": 4.0,
+    "be_trigger_r": 1.0,
+    "be_buffer_bps": 2.0,
+    "trail_trigger_r": 2.5,
+    "trail_atr_mult": 1.2,
+    "trail_step_bps": 5.0,
+    "fee_rate": 0.0004,
+    "slippage_bps": 1.0,
+    "cooldown_bars": 1,
+    "max_hold_minutes": 0,
+    "adopt_existing": true
+  },
+  "orderbook": {
+    "enabled": true,
+    "depth_limit": 20,
+    "min_imbalance": 0.05,
+    "max_spread_bps": 5.0,
+    "periodic_snapshot_s": 0,
+    "max_age_s": 15.0
+  },
+  "execution": {
+    "working_type": "MARK_PRICE",
+    "place_sl": true,
+    "place_tp": true,
+    "position_poll_s": 5,
+    "reconcile_s": 30,
+    "cancel_replace_min_s": 2.0,
+    "max_slippage_bps": 25.0
+  },
+  "net": {
+    "ip_check": true,
+    "ip_check_interval_s": 600,
+    "ip_url": "https://api.ipify.org",
+    "proxy": ""
+  },
+  "dashboard": {
+    "enabled": true,
+    "refresh_ms": 500,
+    "log_lines": 8,
+    "min_width": 72,
+    "min_height": 22,
+    "history_lines": 5
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/scalpbot.log",
+    "max_bytes": 2000000,
+    "backups": 3,
+    "events_file": "logs/events.jsonl",
+    "mode_subdir": true,
+    "state_file": "logs/state.json",
+    "persist_state": true,
+    "timezone": "WIB"
+  }
+}

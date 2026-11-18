@@ -1,0 +1,40 @@
+ SCALPTOOL  PAC PULLBACK  |  TESTNET   SAFE                                                                             
+ WS:OK  0.1s | w:37 | lat:61ms | IP 103.28.14.77 (42s) | up 1h30m                                                       
+ EQUITY 48.62   AVAIL 33.40   DAY +1.84 (+3.93%)   POS 2/3   RISK 1.50%   LEV 10x                                       
+ UNIVERSE auto 5 simbol | tiap 1800s | min 50M                                                                          
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+┌ SIMBOL / SINYAL ─────────────────────────────────┐  ┌ POSISI TERBUKA 2/3 ────────────────────────────────────────────┐
+│SIMB       PRICE TREN    PAC         D% ZN  SIG   │  │ SYM      S      R      PNL         SL         TP STATE         │
+├──────────────────────────────────────────────────┤  │ SOLUSDT  L  +1.12   0.3300    70.5500    71.3000 TRAIL         │
+│ > SIAP EKSEKUSI 1 simbol                         │  │ DOGEUSDT S  +0.62   0.1200   0.058460   0.058200 BE            │
+│SOL      70.8800 UP   ─────┼█───  +0.47 abv LONG  │  └────────────────────────────────────────────────────────────────┘
+│ > DEKAT PAC     1 simbol                         │  ┌ RIWAYAT ENTRY ─────────────────────────────────────────────────┐
+│DOGE    0.058280 UP   ─────┼────  -0.03 in  -     │  │ 15:29 XRP   S SL    0.947800   -0.71$ -1.00R                   │
+│ > TREN JELAS    4 simbol                         │  │ 15:39 ETH   S TOLAK 1,802.37   book: imbalance                 │
+│XRP     0.947800 DOWN █────┼────  -0.40 blw S25m  │  │ 15:47 BCH   L TOLAK -          rezim x4                        │
+│ETH     1,792.17 DOWN █────┼────  -0.57 blw S13m  │  │ 15:50 SOL   L OPEN  70.4200    R=52bps                         │
+│FXS     0.303500 UP   ─────┼█───  +0.83 abv -     │  │ 15:53 DOGE  S OPEN  0.058420   R=38bps                         │
+│BNB       587.39 UP   ─────┼██──  +0.91 abv -     │  └────────────────────────────────────────────────────────────────┘
+│ > FLAT          2 simbol                         │  ┌ EVENT LOG ─────────────────────────────────────────────────────┐
+│BCH       204.93 FLAT █────┼────  -0.86 blw -     │  │ 15:50:39 INFO trade      OPEN LONG SOLUSDT qty=0.71 @70.42 SL=…│
+│BTC    64,057.50 FLAT ─────┼────  +0.01 in  -     │  │ 15:51:09 INFO manage     SOLUSDT BE dipasang @70.44 (R=+0.63)  │
+│                                                  │  │ 15:52:09 INFO manage     SOLUSDT trailing SL -> 70.55 (peak R=…│
+│                                                  │  │ 15:52:39 INFO trade      CLOSE SHORT BTCUSDT TP @63980 PnL +0.…│
+│                                                  │  │ 15:53:09 INFO signal     SHORT DOGEUSDT @0.05842 PAC=0.05855 A…│
+│                                                  │  │ 15:53:24 INFO trade      OPEN SHORT DOGEUSDT qty=860 @0.05842 …│
+│                                                  │  │ 15:53:49 INFO manage     DOGEUSDT BE dipasang @0.05838 (R=+0.5…│
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+│                                                  │  │                                                                │
+└──────────────────────────────────────────────────┘  └────────────────────────────────────────────────────────────────┘
+ Ctrl+C keluar | sinyal 6 trade 3 error 0                                                                               
