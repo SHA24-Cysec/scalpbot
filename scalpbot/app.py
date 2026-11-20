@@ -5,7 +5,9 @@ import itertools
 import json
 import logging
 import math
+import os
 import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -18,7 +20,7 @@ import websocket
 
 from .broker import PaperBroker, TestnetBroker
 from .config import SYMBOL_RE, Config, ConfigError, assert_mode_hosts, confirmation_from_env
-from .dashboard import Dashboard
+from .dashboard import Dashboard, format_session_summary
 from .discovery import Selection, select_symbols
 from .events import Event, EventLog, EventLogHandler
 from .state import StateStore, resolve_path
@@ -278,6 +280,8 @@ class ScalpBotApp:
         self._active_klines: set[str] = set()
         self._url_base_symbols: set[str] = set()
         self._stopping = False
+        self._stop_reason = ""
+        self._fatal_error = ""
         self._last_discovery = 0.0
         self.discovery_note = ""
         self._last_ws_warn = 0.0
@@ -414,6 +418,8 @@ class ScalpBotApp:
         else:
             self.broker = TestnetBroker(self.client, self.cfg)
             for sym in self.cfg.market.symbols:
+                if self._stopping:
+                    break
                 try:
                     self.broker.prepare_symbol(sym)
                 except BinanceError as exc:
@@ -496,6 +502,8 @@ class ScalpBotApp:
         with self._universe_lock:
             runtimes = list(self.symbols.values())
         for rt in runtimes:
+            if self._stopping:
+                break
             self._warmup_symbol(rt)
 
     def _market_streams(self) -> list[str]:
@@ -1052,6 +1060,20 @@ class ScalpBotApp:
                 log.debug("dashboard render error: %s", exc)
             await asyncio.sleep(self.cfg.dashboard.refresh_ms / 1000.0)
 
+    def request_stop(self, reason: str = "Ctrl+C") -> None:
+        if self._stopping:
+            return
+        self._stop_reason = clean_message(reason)
+        self._stopping = True
+        if self.events.console and sys.stderr and sys.stderr.isatty():
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        self.events.add(
+            "INFO",
+            "boot",
+            f"sinyal berhenti diterima ({self._stop_reason}), menutup dengan rapi",
+        )
+
     async def run(self) -> int:
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue(maxsize=2000)
@@ -1068,6 +1090,7 @@ class ScalpBotApp:
             getattr(self.cfg, "live_authorized", False) or confirmation_from_env()
         ):
             self.events.add("ERROR", "boot", "live butuh --live dan konfirmasi eksplisit")
+            self.client.close()
             return 2
         if self.cfg.net.ip_check:
             self.ip.start()
@@ -1078,22 +1101,24 @@ class ScalpBotApp:
         exit_code = 0
         try:
             await asyncio.to_thread(self.preflight)
-            await asyncio.to_thread(self.warmup)
-            # Posisi yang sudah terbuka di exchange harus diadopsi SEBELUM websocket hidup
-            # dan sebelum layar menampilkan POS 0/3.
-            await asyncio.to_thread(self.trader.reconcile_at_start)
-            self.start_threads()
-            tasks = self._tasks = [
-                asyncio.create_task(self.event_consumer()),
-                asyncio.create_task(self.manager_loop()),
-            ]
-            if self.dashboard.enabled:
-                tasks.append(asyncio.create_task(self.dashboard_loop()))
-            await asyncio.gather(*tasks)
+            if not self._stopping:
+                await asyncio.to_thread(self.warmup)
+            if not self._stopping and self.trader is not None:
+                await asyncio.to_thread(self.trader.reconcile_at_start)
+            if not self._stopping:
+                self.start_threads()
+                tasks = self._tasks = [
+                    asyncio.create_task(self.event_consumer()),
+                    asyncio.create_task(self.manager_loop()),
+                ]
+                if self.dashboard.enabled:
+                    tasks.append(asyncio.create_task(self.dashboard_loop()))
+                await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            self.events.add("CRITICAL", "boot", f"berhenti karena error: {type(exc).__name__}: {exc}")
+            self._fatal_error = clean_message(f"{type(exc).__name__}: {exc}")
+            self.events.add("CRITICAL", "boot", f"berhenti karena error: {self._fatal_error}")
             exit_code = 1
         finally:
             self._stopping = True
@@ -1101,6 +1126,7 @@ class ScalpBotApp:
                 t.cancel()
             if self._tasks:
                 await asyncio.gather(*self._tasks, return_exceptions=True)
+            self.dashboard.stop()
             if self._market_ws:
                 self._market_ws.stop()
             if self._user_ws:
@@ -1108,69 +1134,89 @@ class ScalpBotApp:
             if self.cfg.mode != "paper" and self._listen_key:
                 try:
                     self.client.listen_key_delete(self._listen_key)
-                except BinanceError:
-                    pass
-            # Pastikan cooldown + riwayat entry terakhir tersimpan sebelum keluar.
+                except Exception as exc:
+                    log.debug("hapus listenKey saat tutup gagal: %s", exc)
             if trader := self.trader:
                 try:
                     trader._persist_state()
-                except Exception as exc:  # noqa: BLE001 - jangan gagal saat shutdown
+                except Exception as exc:
                     log.debug("flush state gagal: %s", exc)
             self.ip.stop()
-            self.dashboard.stop()
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
             self.client.close()
             trader = self.trader
             if trader:
+                stats = trader.stats()
                 self._file_log.info(
                     "selesai mode=%s durasi=%.0fs equity=%.2f trades=%d sinyal=%d error=%d",
                     self.cfg.mode,
                     time.time() - self.started_at,
-                    trader.equity,
-                    trader.day.trades,
-                    trader.day.signals,
-                    trader.error_count,
+                    stats["equity"],
+                    stats["trades"],
+                    stats["signals"],
+                    stats["errors"],
+                )
+            else:
+                self._file_log.info(
+                    "selesai mode=%s durasi=%.0fs status=%s",
+                    self.cfg.mode,
+                    time.time() - self.started_at,
+                    self._fatal_error or self._stop_reason or "selesai",
                 )
             self._print_summary()
         return exit_code
 
-    def _print_summary(self) -> None:
+    def _summary_payload(self) -> dict[str, Any]:
         trader = self.trader
-        if not trader:
-            return
-        lines = [
-            "",
-            "=" * 64,
-            "RINGKASAN SESI",
-            f"  mode          : {self.cfg.mode}",
-            f"  log teknis    : {self.log_file}",
-            f"  log event     : {self.events_file}",
-            f"  state         : {self.state_file or 'dimatikan'}",
-            f"  zona waktu    : {tz_label(self.cfg.logging.timezone)} "
-            f"(tampilan & hari bot; hari exchange untuk tampilan Binance tetap UTC)",
-            f"  durasi        : {time.time() - self.started_at:.0f}s",
-            f"  equity        : {trader.equity:.2f} USDT",
-            f"  realized hari : {trader.current_realized():+.2f} USDT "
-            f"(hari bot {tz_label(self.cfg.logging.timezone)}; termasuk PnL sebelum bot start)",
-            f"  trade         : {trader.day.trades} (W{trader.day.wins}/L{trader.day.losses})",
-            f"  sinyal        : {trader.day.signals}",
-            f"  posisi terbuka: {trader.position_count()}",
-            f"  error         : {trader.error_count}",
-        ]
-        if trader.reject_stats:
-            book = {k: v for k, v in trader.reject_stats.items() if k != "regime"}
-            if book:
-                ringkas = ", ".join(f"{k} {v}" for k, v in sorted(book.items()))
-                lines.append(f"  tolak entry   : {ringkas} (orderbook)")
-            if trader.reject_stats.get("regime"):
-                lines.append(
-                    f"  tolak rezim   : {trader.reject_stats['regime']} sinyal "
-                    f"(slope < {self.cfg.strategy.regime_min_slope_bps:g} bps)"
-                )
-        lines += [
-            "=" * 64,
-        ]
-        print("\n".join(lines))
+        payload: dict[str, Any] = {
+            "mode": self.cfg.mode,
+            "timezone_label": tz_label(self.cfg.logging.timezone),
+            "duration_s": max(0.0, time.time() - self.started_at),
+            "stop_reason": getattr(self, "_stop_reason", ""),
+            "fatal_error": getattr(self, "_fatal_error", ""),
+            "log_file": self.log_file,
+            "events_file": self.events_file,
+            "state_file": self.state_file,
+            "regime_min_slope_bps": self.cfg.strategy.regime_min_slope_bps,
+            "has_trader": trader is not None,
+        }
+        if trader is not None:
+            stats = trader.stats()
+            open_rows = trader.position_rows()
+            open_symbols = [
+                f"{row.get('symbol', '')} {row.get('side', '')}".strip()
+                for row in open_rows
+                if row.get("symbol")
+            ]
+            payload.update(
+                {
+                    "equity": stats["equity"],
+                    "available": stats["available"],
+                    "realized": stats["realized"],
+                    "start_equity": stats["start_equity"],
+                    "halted_reason": stats["halted_reason"],
+                    "signals": stats["signals"],
+                    "trades": stats["trades"],
+                    "wins": stats["wins"],
+                    "losses": stats["losses"],
+                    "reject_stats": stats["book_rejects"],
+                    "errors": stats["errors"],
+                    "open_count": stats["open_count"],
+                    "open_symbols": open_symbols,
+                }
+            )
+        return payload
+
+    def _print_summary(self) -> None:
+        if sys.stderr:
+            sys.stderr.flush()
+        use_color = sys.stdout.isatty() and not bool(os.environ.get("NO_COLOR"))
+        rendered = format_session_summary(self._summary_payload(), color=use_color)
+        if use_color:
+            sys.stdout.write(f"\n{rendered}\n")
+            sys.stdout.flush()
+        else:
+            print(f"\n{rendered}", flush=True)
 
 
 async def run_app(cfg: Config, paper_balance: float = 50.0) -> int:
@@ -1178,32 +1224,51 @@ async def run_app(cfg: Config, paper_balance: float = 50.0) -> int:
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     stop_requested = threading.Event()
+    installed_loop: list[int] = []
+    previous_signals: list[tuple[int, Any]] = []
 
-    def _signal_handler() -> None:
+    def _signal_handler(label: str) -> None:
         if stop_requested.is_set():
             return
         stop_requested.set()
-        app.events.add("INFO", "boot", "sinyal berhenti diterima, menutup dengan rapi")
+        app.request_stop(label)
         loop.call_soon_threadsafe(stop_event.set)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig_num, sig_label in ((signal.SIGINT, "Ctrl+C"), (signal.SIGTERM, "SIGTERM")):
         try:
-            loop.add_signal_handler(sig, _signal_handler)
+            loop.add_signal_handler(sig_num, _signal_handler, sig_label)
+            installed_loop.append(sig_num)
         except (NotImplementedError, RuntimeError, AttributeError, ValueError):
             try:
-                signal.signal(sig, lambda *_: _signal_handler())
+                prev = signal.getsignal(sig_num)
+                signal.signal(sig_num, lambda *_, lbl=sig_label: _signal_handler(lbl))
+                previous_signals.append((sig_num, prev))
             except (ValueError, OSError, AttributeError):
                 pass
 
     task = asyncio.create_task(app.run())
     stop_task = asyncio.create_task(stop_event.wait())
-    done, pending = await asyncio.wait({task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
-    if stop_task in done and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    for p in pending:
-        p.cancel()
+    try:
+        done, pending = await asyncio.wait({task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        if stop_task in done and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        for p in pending:
+            p.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+    finally:
+        for sig_num in installed_loop:
+            try:
+                loop.remove_signal_handler(sig_num)
+            except (NotImplementedError, RuntimeError, AttributeError, ValueError):
+                pass
+        for sig_num, prev in previous_signals:
+            try:
+                signal.signal(sig_num, prev)
+            except (ValueError, OSError, TypeError, AttributeError):
+                pass
     return task.result() if task.done() and not task.cancelled() else 0

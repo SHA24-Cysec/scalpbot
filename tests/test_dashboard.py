@@ -324,3 +324,153 @@ class TestLayoutSweep(unittest.TestCase):
         state["rows"] = []
         frame = dash.build_frame(state, 120, 40)
         self.assertIn("SIMBOL", frame)
+
+
+class TestSessionSummaryAndShutdown(unittest.TestCase):
+    def _sample_summary(self, **overrides):
+        base = {
+            "mode": "testnet",
+            "timezone_label": "WIB",
+            "duration_s": 43336.0,
+            "stop_reason": "Ctrl+C",
+            "fatal_error": "",
+            "halted_reason": "",
+            "log_file": "logs/testnet/scalpbot.log",
+            "events_file": "logs/testnet/events.jsonl",
+            "state_file": "logs/testnet/state.json",
+            "regime_min_slope_bps": 100.0,
+            "has_trader": True,
+            "equity": 3819.30,
+            "available": 3500.00,
+            "realized": 75.38,
+            "start_equity": 3743.92,
+            "signals": 26,
+            "trades": 6,
+            "wins": 2,
+            "losses": 4,
+            "reject_stats": {"regime": 32, "imbalance": 5},
+            "errors": 8,
+            "open_count": 0,
+            "open_symbols": [],
+        }
+        base.update(overrides)
+        return base
+
+    def test_summary_renders_aligned_multiline_box_across_widths(self):
+        from scalpbot.dashboard import fmt_duration_long, format_session_summary
+
+        self.assertEqual(fmt_duration_long(43336), "12h 02m 16s (43,336s)")
+        self.assertEqual(fmt_duration_long(45), "45s")
+
+        for use_color in (False, True):
+            for width in (50, 68, 80, 120, 180):
+                out = format_session_summary(self._sample_summary(), width=width, color=use_color)
+                lines = out.split("\n")
+                self.assertGreaterEqual(len(lines), 14)
+                widths = {_visible(line) for line in lines}
+                self.assertEqual(len(widths), 1, f"color={use_color} width={width}")
+                box_w = next(iter(widths))
+                self.assertLessEqual(box_w, width)
+                self.assertIn("RINGKASAN SESI | TESTNET", out)
+                self.assertIn("Ctrl+C", out)
+                self.assertIn("12h 02m 16s", out)
+
+    def test_summary_handles_open_positions_early_stop_and_redaction(self):
+        from scalpbot.dashboard import format_session_summary
+
+        with_pos = format_session_summary(
+            self._sample_summary(
+                mode="live",
+                open_count=2,
+                open_symbols=["SOLUSDT LONG", "DOGEUSDT SHORT"],
+            ),
+            width=90,
+            color=False,
+        )
+        self.assertIn("RINGKASAN SESI | LIVE", with_pos)
+        self.assertNotIn("LIVE  LIVE", with_pos)
+        self.assertIn("SOLUSDT LONG", with_pos)
+        self.assertIn("Order SL/TP tetap aktif", with_pos)
+
+        live_colored = format_session_summary(
+            self._sample_summary(mode="live"),
+            width=90,
+            color=True,
+        )
+        widths = {_visible(line) for line in live_colored.split("\n")}
+        self.assertEqual(len(widths), 1)
+        self.assertIn("LIVE", live_colored)
+
+        early = format_session_summary(
+            self._sample_summary(
+                has_trader=False,
+                stop_reason="",
+                fatal_error="BinanceError: api_secret=rahasia123 \x1b[2J",
+            ),
+            width=80,
+            color=True,
+        )
+        self.assertIn("Berhenti karena error", early)
+        self.assertNotIn("rahasia123", early)
+        self.assertNotIn("\x1b[2J", early)
+        self.assertNotIn("Equity akhir", early)
+
+    def test_print_summary_and_sigint_shutdown_are_clean(self):
+        import asyncio
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from scalpbot.__main__ import main as cli_main
+        from scalpbot.app import ScalpBotApp, run_app
+        from scalpbot.config import Config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg = Config()
+            cfg.mode = "paper"
+            cfg.net.ip_check = False
+            cfg.dashboard.enabled = False
+            cfg.logging.file = str(base / "logs" / "bot.log")
+            cfg.logging.events_file = str(base / "logs" / "ev.jsonl")
+            cfg.logging.state_file = str(base / "logs" / "state.json")
+
+            gate = asyncio.Event()
+
+            async def drive() -> tuple[int, str]:
+                buf = io.StringIO()
+                with (
+                    patch.object(ScalpBotApp, "preflight", lambda self: None),
+                    patch.object(ScalpBotApp, "warmup", lambda self: None),
+                    patch.object(ScalpBotApp, "start_threads", lambda self: gate.set()),
+                    contextlib.redirect_stdout(buf),
+                ):
+                    runner = asyncio.create_task(run_app(cfg, paper_balance=100.0))
+                    await asyncio.wait_for(gate.wait(), timeout=5.0)
+                    await asyncio.sleep(0.05)
+                    import os
+                    import signal
+
+                    os.kill(os.getpid(), signal.SIGINT)
+                    rc = await asyncio.wait_for(runner, timeout=5.0)
+                return rc, buf.getvalue()
+
+            code, text = asyncio.run(drive())
+            self.assertEqual(code, 0)
+            lines = [ln for ln in text.splitlines() if ln.strip()]
+            self.assertGreaterEqual(len(lines), 8)
+            self.assertTrue(lines[0].startswith("\u250c RINGKASAN SESI | PAPER"))
+            self.assertTrue(lines[-1].startswith("\u2514"))
+            self.assertIn("Dihentikan dengan rapi (Ctrl+C)", text)
+
+        cli_buf = io.StringIO()
+        with (
+            patch("scalpbot.__main__.cmd_check", side_effect=KeyboardInterrupt),
+            contextlib.redirect_stdout(cli_buf),
+        ):
+            rc = cli_main(["check"])
+        self.assertEqual(rc, 130)
+        self.assertIn("Ctrl+C", cli_buf.getvalue())
+

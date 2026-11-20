@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import logging
 import logging.handlers
 import os
@@ -31,12 +32,13 @@ _PROXY_CREDENTIALS = re.compile(
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*")
 _JWT = re.compile(r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _LONG_TOKEN = re.compile(r"\b[A-Za-z0-9]{64,}\b")
-_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_OSC = re.compile(r"(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)")
+_ANSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def sanitize_control(text: str) -> str:
-    return _CONTROL.sub("", _ANSI.sub("", str(text)))
+    return _CONTROL.sub("", _ANSI.sub("", _OSC.sub("", str(text))))
 
 
 def redact(text: str) -> str:
@@ -67,9 +69,18 @@ class RedactingFormatter(logging.Formatter):
         return super().format(clone)
 
 
+def clean_multiline(text: str) -> str:
+    normalized = str(text).replace("\r\n", "\n").replace("\r", "")
+    return "\n".join(clean_message(line) for line in normalized.split("\n"))
+
+
 def safe_print(*values: object, **kwargs: Any) -> None:
-    cleaned = [clean_message(v) if isinstance(v, str) else v for v in values]
-    print(*cleaned, **kwargs)  # noqa: RUF100, T201
+    cleaned = [clean_multiline(v) if isinstance(v, str) else v for v in values]
+    if isinstance(kwargs.get("sep"), str):
+        kwargs["sep"] = clean_multiline(kwargs["sep"])
+    if isinstance(kwargs.get("end"), str):
+        kwargs["end"] = clean_multiline(kwargs["end"])
+    builtins.print(*cleaned, **kwargs)
 
 
 class PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):

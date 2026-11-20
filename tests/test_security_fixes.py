@@ -443,6 +443,21 @@ class TestSSRFProxyAndTerminal(unittest.TestCase):
         self.assertNotIn("\x07", out)
         self.assertNotIn("short-secret-123", out)
 
+        multi_buf = io.StringIO()
+        with contextlib.redirect_stdout(multi_buf):
+            safe_print(
+                "baris satu\r\nbaris dua \x1b]0;judul-palsu\x07\x9b2J\n"
+                "BINANCE_API_SECRET=rahasia-456",
+                sep="\r\x07\n",
+            )
+        multi_out = multi_buf.getvalue()
+        self.assertEqual(
+            multi_out.splitlines(),
+            ["baris satu", "baris dua ", "BINANCE_API_SECRET=***"],
+        )
+        self.assertNotIn("judul-palsu", multi_out)
+        self.assertNotIn("rahasia-456", multi_out)
+
         event = Event(ts=0.0, level="INFO", source="ws\x1b[2J", message="secret=abc \x1b[H")
         state = _clean_state({"events": [event], "halted": "ESC\x1b[2J"})
         self.assertNotIn("\x1b", state["events"][0].source)

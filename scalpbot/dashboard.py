@@ -231,7 +231,7 @@ class Dashboard:
         except (ValueError, OSError, TypeError, AttributeError):
             pass
         out = sys.stdout
-        out.write("\x1b[?25h\x1b[?1049l")
+        out.write(f"{RESET}\x1b[?25h\x1b[?1049l\r\x1b[K")
         out.flush()
         self._started = False
 
@@ -730,3 +730,211 @@ def safe_number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return out if math.isfinite(out) else 0.0
+
+
+def fmt_duration_long(seconds: float) -> str:
+    if not math.isfinite(seconds):
+        return "-"
+    total = max(0, round(seconds))
+    if total < 60:
+        return f"{total}s"
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        human = f"{days}d {hours:02d}h {minutes:02d}m {secs:02d}s"
+    elif hours:
+        human = f"{hours}h {minutes:02d}m {secs:02d}s"
+    else:
+        human = f"{minutes}m {secs:02d}s"
+    return f"{human} ({total:,}s)"
+
+
+def _wrap_plain(text: str, width: int) -> list[str]:
+    width = max(8, width)
+    raw = str(text)
+    if len(raw) <= width:
+        return [raw]
+    chunks: list[str] = []
+    rest = raw
+    while len(rest) > width:
+        window = rest[: width + 1]
+        cut = window.rfind(" ")
+        if cut < width // 3:
+            slash = max(window[:width].rfind("/"), window[:width].rfind("\\"))
+            cut = slash + 1 if slash >= width // 3 else width
+            chunks.append(rest[:cut].rstrip())
+            rest = rest[cut:].lstrip()
+        else:
+            chunks.append(rest[:cut].rstrip())
+            rest = rest[cut + 1 :].lstrip()
+    if rest or not chunks:
+        chunks.append(rest)
+    return chunks
+
+
+def format_session_summary(
+    summary: dict[str, Any],
+    width: int | None = None,
+    color: bool | None = None,
+) -> str:
+    data = _clean_state(dict(summary))
+    if color is None:
+        use_color = (
+            sys.stdout.isatty()
+            and not bool(os.environ.get("NO_COLOR"))
+            and _enable_windows_vt()
+        )
+    else:
+        use_color = bool(color)
+
+    def style(code: str, text: str) -> str:
+        return f"{code}{text}{RESET}" if use_color and code and text else text
+
+    mode = str(data.get("mode") or "?").upper()
+    tz = str(data.get("timezone_label") or "WIB")
+    fatal_error = str(data.get("fatal_error") or "").strip()
+    stop_reason = str(data.get("stop_reason") or "").strip()
+    halted_reason = str(data.get("halted_reason") or "").strip()
+
+    sections: list[list[tuple[str, str, str, str, str]]] = []
+    sec_info: list[tuple[str, str, str, str, str]] = []
+    if fatal_error:
+        sec_info.append(("Status", "Berhenti karena error", BOLD + BRIGHT_RED, "", ""))
+        sec_info.append(("Penyebab", fatal_error, BRIGHT_RED, "", ""))
+    elif stop_reason:
+        sec_info.append(("Status", f"Dihentikan dengan rapi ({stop_reason})", GREEN, "", ""))
+    else:
+        sec_info.append(("Status", "Selesai", GREEN, "", ""))
+    if halted_reason:
+        sec_info.append(("Guard aktif", halted_reason, YELLOW, "", ""))
+    sec_info.append(("Durasi", fmt_duration_long(safe_number(data.get("duration_s"))), WHITE, "", ""))
+    tz_note = (
+        " (mode paper, tanpa order nyata)"
+        if mode == "PAPER"
+        else " (acuan hari bot; aplikasi Binance tetap UTC)"
+    )
+    sec_info.append(("Zona waktu", tz, CYAN, tz_note, DIM))
+    sections.append(sec_info)
+
+    if data.get("has_trader"):
+        sec_perf: list[tuple[str, str, str, str, str]] = []
+        equity = safe_number(data.get("equity"))
+        realized = safe_number(data.get("realized"))
+        start_eq = safe_number(data.get("start_equity")) or equity
+        pct_txt = f" ({realized / start_eq * 100.0:+.2f}%)" if start_eq > 0 else ""
+        pnl_note = " [sesi paper]" if mode == "PAPER" else f" [hari bot {tz}]"
+        sec_perf.append(("Equity akhir", f"{fmt_num(equity)} USDT", BOLD + WHITE, "", ""))
+        sec_perf.append(
+            ("Realized hari", f"{realized:+,.2f} USDT{pct_txt}", color_for_pnl(realized), pnl_note, DIM)
+        )
+        trades = int(safe_number(data.get("trades")))
+        wins = int(safe_number(data.get("wins")))
+        losses = int(safe_number(data.get("losses")))
+        if trades > 0:
+            wr = wins / trades * 100.0
+            sec_perf.append(("Trade selesai", str(trades), WHITE, f" (W{wins} / L{losses} | WR {wr:.1f}%)", DIM))
+        else:
+            sec_perf.append(("Trade selesai", "0", GRAY, f" (W{wins} / L{losses})", DIM))
+        signals = int(safe_number(data.get("signals")))
+        sec_perf.append(("Sinyal lolos", str(signals), WHITE if signals > 0 else GRAY, "", ""))
+
+        raw_rejects = data.get("reject_stats") if isinstance(data.get("reject_stats"), dict) else {}
+        book_items = {
+            str(k): int(safe_number(v))
+            for k, v in raw_rejects.items()
+            if k != "regime" and int(safe_number(v)) > 0
+        }
+        if book_items:
+            ringkas = ", ".join(f"{k} {v}" for k, v in sorted(book_items.items()))
+            sec_perf.append(("Tolak entry", ringkas, YELLOW, " (orderbook)", DIM))
+        regime_cnt = int(safe_number(raw_rejects.get("regime")))
+        if regime_cnt > 0:
+            slope = safe_number(data.get("regime_min_slope_bps"))
+            sec_perf.append(("Tolak rezim", f"{regime_cnt} sinyal", YELLOW, f" (slope < {slope:g} bps)", DIM))
+
+        open_count = int(safe_number(data.get("open_count")))
+        raw_open = data.get("open_symbols") if isinstance(data.get("open_symbols"), list) else []
+        open_syms = [str(item) for item in raw_open if str(item)]
+        if open_count > 0:
+            shown = ", ".join(open_syms[:3])
+            extra = f", +{len(open_syms) - 3}" if len(open_syms) > 3 else ""
+            detail = f" ({shown}{extra})" if shown else ""
+            sec_perf.append(("Posisi terbuka", str(open_count), YELLOW, detail, DIM))
+            if mode != "PAPER":
+                sec_perf.append(("Proteksi", "Order SL/TP tetap aktif di server Binance", CYAN, "", ""))
+        else:
+            sec_perf.append(("Posisi terbuka", "0", GRAY, "", ""))
+
+        errors = int(safe_number(data.get("errors")))
+        sec_perf.append(("Error", str(errors), BRIGHT_RED if errors > 0 else GRAY, "", ""))
+        sections.append(sec_perf)
+
+    sec_files: list[tuple[str, str, str, str, str]] = [
+        ("Log teknis", str(data.get("log_file") or "dimatikan"), "", "", ""),
+        ("Log event", str(data.get("events_file") or "dimatikan"), "", "", ""),
+        ("State", str(data.get("state_file") or "dimatikan"), "", "", ""),
+    ]
+    sections.append(sec_files)
+
+    term_w = width if width is not None else shutil.get_terminal_size(fallback=(88, 24)).columns
+    term_w = max(44, int(term_w))
+    label_w = 14
+    prefix_len = 1 + label_w + 3
+    natural_inner = max(
+        prefix_len + len(val) + len(sfx) + 1
+        for sec in sections
+        for _, val, _, sfx, _ in sec
+    )
+    head_plain = f" RINGKASAN SESI | {mode} "
+    live_title = " RINGKASAN SESI "
+    live_badge = " LIVE "
+    min_box = min(term_w, 68)
+    max_box = min(term_w, 92)
+    wanted = max(natural_inner + 2, len(head_plain) + 6)
+    box_w = max(min_box, min(wanted, max_box))
+    inner_w = box_w - 2
+    val_room = max(8, inner_w - prefix_len - 1)
+
+    if mode == "LIVE" and use_color and len(live_title) + len(live_badge) + 1 <= inner_w:
+        fill = max(0, inner_w - len(live_title) - len(live_badge) - 1)
+        top = (
+            style(GRAY, "\u250c")
+            + style(BOLD + WHITE, live_title)
+            + style(BG_RED + BOLD, live_badge)
+            + style(GRAY, " " + "\u2500" * fill + "\u2510")
+        )
+    else:
+        clipped_head = head_plain[:inner_w]
+        fill = max(0, inner_w - len(clipped_head))
+        top = (
+            style(GRAY, "\u250c")
+            + style(BOLD + WHITE, clipped_head)
+            + style(GRAY, "\u2500" * fill + "\u2510")
+        )
+
+    mid = style(GRAY, "\u251c" + "\u2500" * inner_w + "\u2524")
+    bot = style(GRAY, "\u2514" + "\u2500" * inner_w + "\u2518")
+    lbar = style(GRAY, "\u2502")
+    rbar = style(GRAY, "\u2502")
+    cont_pfx = " " * prefix_len
+
+    out_lines: list[str] = [top]
+    for sec_idx, sec in enumerate(sections):
+        if sec_idx > 0:
+            out_lines.append(mid)
+        for label, val, vcol, sfx, scol in sec:
+            pfx_styled = f" {style(DIM, f'{label:<{label_w}}')} {style(GRAY, ':')} "
+            if len(val) + len(sfx) <= val_room:
+                body = style(vcol, val) + style(scol, sfx)
+                pad_r = " " * max(0, inner_w - prefix_len - len(val) - len(sfx))
+                out_lines.append(f"{lbar}{pfx_styled}{body}{pad_r}{rbar}")
+            else:
+                wrapped = _wrap_plain(val + sfx, val_room)
+                for idx, part in enumerate(wrapped):
+                    lead = pfx_styled if idx == 0 else cont_pfx
+                    pad_r = " " * max(0, inner_w - prefix_len - len(part))
+                    out_lines.append(f"{lbar}{lead}{style(vcol, part)}{pad_r}{rbar}")
+    out_lines.append(bot)
+    return "\n".join(out_lines)
+

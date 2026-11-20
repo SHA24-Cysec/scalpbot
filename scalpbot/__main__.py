@@ -104,7 +104,11 @@ def _live_gate(cfg, args) -> bool:
         return True
     if sys.stdin.isatty():
         print("MODE LIVE: order nyata akan dikirim ke Binance.")
-        answer = input("Ketik LIVE untuk melanjutkan: ").strip()
+        try:
+            answer = input("Ketik LIVE untuk melanjutkan: ").strip()
+        except EOFError:
+            print()
+            answer = ""
         if answer == "LIVE":
             return True
     print("Dibatalkan. Set SCALPBOT_LIVE_CONFIRM=YES-LIVE atau ketik LIVE saat diminta.")
@@ -551,7 +555,7 @@ def cmd_signals(args: argparse.Namespace) -> int:
                 fd = os.open(path, flags, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                     tz_tag = tz_label(cfg.logging.timezone).lower().replace(" ", "_")
-                    fh.write(clean_message(f"time_{tz_tag},symbol,side,close,pac_center,atr,trend\n"))
+                    fh.write(clean_message(f"time_{tz_tag},symbol,side,close,pac_center,atr,trend") + "\n")
                     for r in rows:
                         fh.write(",".join(clean_message(cell) for cell in r) + "\n")
                 ensure_private_file(path)
@@ -584,6 +588,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {exc}")
         return 2
     except KeyboardInterrupt:
+        print("\n[dihentikan] dibatalkan oleh pengguna (Ctrl+C)")
         return 130
     return 1
 
