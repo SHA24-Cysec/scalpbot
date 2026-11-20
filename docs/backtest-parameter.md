@@ -1,20 +1,17 @@
 # Laporan backtest dan tuning parameter
 
-Data: Binance USDⓈ-M **5 menit**, 5 simbol (BTC, ETH, BCH, XRP, DOGE). Dua rentang dipakai:
+> **Status: arsip pra-perbaikan Tahap 3.** Semua angka di bawah berasal dari simulator sebelum perbaikan fee entry, slippage fill, sizing, ATR trailing, warmup, walk-forward, cache, dan urutan trade. Dataset 312 hari maupun 62 hari tidak tersedia di workspace, jadi angka ini tidak dapat direproduksi dan tidak boleh dipakai untuk memilih parameter. Jalankan ulang `python3 -m tools.tune` setelah perbaikan, lalu simpan metadata cache bila hasilnya perlu diaudit.
 
-- **312 hari** (Jan–Nov 2026, 90.000 bar/simbol) untuk memilih dan menguji filter rezim.
-- **62 hari** (Sep–Nov 2026) untuk uji awal parameter SL/TP, karena itu data terbaru.
+Data arsip: Binance USD-M Futures **5 menit**, 5 simbol (BTC, ETH, BCH, XRP, DOGE). Dua rentang disebut di laporan lama:
 
-Fee taker 0,04% per sisi, slippage 1 bps per sisi.
+- **312 hari** (Jan-Nov 2026, 90.000 bar/simbol) untuk memilih dan menguji filter rezim.
+- **62 hari** (Sep-Nov 2026) untuk uji awal parameter SL/TP, karena itu data terbaru.
 
-Simulasi memakai kode yang sama dengan bot: `strategy.ScalpPullbackStrategy` dan
-`risk.plan_stops / trailing_stop / breakeven_price`. Aturan konservatif: bila SL dan TP
-tersentuh pada bar yang sama, SL dianggap lebih dulu kena.
+Model saat ini memakai fee taker 0,04% per sisi dan slippage 1 bps per sisi pada harga fill. Arsip ini dihasilkan sebelum slippage fill diterapkan, jadi biaya pada tabel bisa undercount.
 
-> **Ringkasnya:** parameter SL/TP mengubah ekspektasi dari -0,43 R menjadi +0,06 R, tapi angka itu
-> masih di dalam noise. Yang membuat hasilnya berbeda adalah **filter rezim tren**: +0,155 R
-> dengan CI 95% [+0,050, +0,261] — signifikan pada 312 hari data, dan profitnya tidak lagi
-> hanya dari satu arah.
+Simulator memakai `strategy.ScalpPullbackStrategy`, `risk.plan_stops`, `risk.size_position`, `breakeven_price`, dan `trailing_stop`. Aturan konservatif: bila SL dan TP tersentuh pada bar yang sama, SL dianggap lebih dulu kena. Perbedaan yang tersisa dari live: high/low intrabar versus harga mark, tidak ada penolakan order, tidak ada requote, tidak ada funding, dan tidak ada kegagalan Algo Order API.
+
+> **Ringkasan arsip:** parameter SL/TP disebut mengubah ekspektasi dari -0,43 R menjadi +0,06 R, dan filter rezim tren disebut memberi +0,155 R dengan CI 95% [+0,050, +0,261]. Kedua klaim signifikansi berasal dari bootstrap i.i.d. lama dan seleksi yang melihat seluruh data, jadi keduanya hanya indikasi arsip, bukan bukti edge.
 
 ## 1. Parameter lama vs baru
 
@@ -25,7 +22,7 @@ tersentuh pada bar yang sama, SL dianggap lebih dulu kena.
 | Net (5 akun @100 USDT, bukan compounding) | -112,6% | +38,7% |
 | Ekspektasi per trade | **-0,434 R** | **+0,060 R** |
 | Profit factor | 0,44 | 1,16 |
-| Drawdown per simbol | 5,7–18,5% | 5,7–18,5% |
+| Drawdown per simbol | 5,7-18,5% | 5,7-18,5% |
 
 ## 2. Kenapa parameter lama rugi (aritmetika, bukan opini)
 
@@ -42,7 +39,7 @@ yang paling menentukan hidup-mati adalah jarak SL dan frekuensi trade, bukan fil
 
 ## 3. Grid yang diuji
 
-144 kombinasi `sl_atr_mult` (1,5–10) × `tp_rr` (1,5–5) × `be_trigger_r` (0,5–2) × setting trailing.
+144 kombinasi `sl_atr_mult` (1,5-10) × `tp_rr` (1,5-5) × `be_trigger_r` (0,5-2) × setting trailing.
 Semua kombinasi dengan SL sempit tetap negatif. Yang mendekati nol atau positif semuanya punya
 SL ≥ 4×ATR dan TP ≥ 3R.
 
@@ -67,21 +64,20 @@ menjadi -72,2% (tetap rugi). Pada parameter baru, perubahan fee yang sama mengub
 | Uji | Hasil | Kesimpulan |
 |---|---|---|
 | Bootstrap 95% CI, fee taker 0,04% | expR +0,060, CI **[-0,068, +0,191]** | tidak bisa dibedakan dari nol |
-| Bootstrap 95% CI, fee maker 0,02% | expR +0,137, CI **[+0,005, +0,272]** | signifikan secara teknis, tapi baru 499 trade |
-| Walk-forward 65%/35% | IS -0,014 → OOS **+0,244** | arah bagus, tapi OOS > IS itu mencurigakan sendiri |
+| Bootstrap 95% CI, fee maker 0,02% | expR +0,137, CI **[+0,005, +0,272]** | indikasi arsip, tapi baru 499 trade |
+| Walk-forward 65%/35% | IS -0,014 -> OOS **+0,244** | arah bagus, tapi OOS > IS itu mencurigakan sendiri; seleksi lama melihat OOS |
 | Per jendela 8,7 hari (7 jendela) | +20,3 / -21,2 / +16,5 / -10,8 / -11,4 / +5,7 / +32,9 | **3 dari 7 jendela negatif** |
 | Arah LONG vs SHORT | LONG -0,083 R, SHORT +0,184 R | **edge tidak simetris**, hanya datang dari SHORT |
-| Leave-one-out (buang 1 simbol) | PF 1,10–1,21 di semua kasus | tidak bergantung pada satu simbol |
+| Leave-one-out (buang 1 simbol) | PF 1,10-1,21 di semua kasus | tidak bergantung pada satu simbol |
 | Harga sampel | rata-rata turun **-23,7%** (semua simbol turun) | pasar sedang downtrend kuat |
 
-Poin yang paling penting: **seluruh profit berasal dari SHORT, dan periode sampel adalah
-downtrend -23,7%.** Sinyal LONG kalah di semua kecuali satu jendela. Jadi hasil positif ini
+Poin penting pada arsip: **seluruh profit berasal dari SHORT, dan periode sampel adalah
+downtrend -23,7%.** Sinyal LONG kalah di semua kecuali satu jendela. Jadi hasil positif arsip
 belum membuktikan strategi punya edge dua arah; yang lebih mungkin terjadi adalah strategi
 ikut arus turun.
 
-Kekuatan statistik: sd R = 1,51. Untuk membuktikan expR +0,06 lebih besar dari nol dengan
-power 80% dibutuhkan sekitar **5000 trade**. Sampel ini 512 trade. Jangan perlakukan angka
-+38,7% sebagai proyeksi.
+Kekuatan statistik arsip: sd R = 1,51. Untuk membuktikan expR +0,06 lebih besar dari nol dengan
+power 80% disebut butuh sekitar **5000 trade**. Sampel ini 512 trade. Bootstrap sekarang memakai blok kronologis, bukan i.i.d., tetapi angka lama tetap tidak bisa dipakai sebagai proyeksi.
 
 ## 5. Per simbol (config baru, fee taker 0,04%)
 
@@ -106,12 +102,12 @@ arah sinyal, tapi **pasar sideways**:
 
 | Blok ~52 hari | Tren pasar | expR tanpa filter | LONG | SHORT |
 |---|---|---|---|---|
-| Jan–Mar | -19,4% | +0,128 | +7 | +60 |
-| Mar–Apr | **+6,0%** | **-0,063** | -17 | -22 |
-| Apr–Jun | -14,9% | +0,098 | -22 | +55 |
-| Jun–Agu | **-1,4%** | **-0,002** | +6 | -24 |
-| Agu–Sep | **+28,6%** | -0,022 | **+86** | -46 |
-| Sep–Nov | -22,5% | +0,126 | -20 | +72 |
+| Jan-Mar | -19,4% | +0,128 | +7 | +60 |
+| Mar-Apr | **+6,0%** | **-0,063** | -17 | -22 |
+| Apr-Jun | -14,9% | +0,098 | -22 | +55 |
+| Jun-Agu | **-1,4%** | **-0,002** | +6 | -24 |
+| Agu-Sep | **+28,6%** | -0,022 | **+86** | -46 |
+| Sep-Nov | -22,5% | +0,126 | -20 | +72 |
 
 Dua blok paling rugi adalah dua blok dengan pergerakan pasar paling datar. Sebaliknya pada
 blok uptrend +28,6%, strategi justru untung besar dari LONG (+86) dan rugi dari SHORT (-46).
@@ -141,12 +137,12 @@ strategy.regime_min_slope_bps: 100.0    # 0 = filter mati (perilaku lama)
 | 160 | 477 | +0,206 | 1,39 | 2/6 | 9,2 |
 | 200 | 326 | +0,289 | 1,56 | 1/6 | 6,3 |
 
-Kurvanya **monoton**: makin ketat filternya, makin baik per trade (PF 1,03 → 1,56). Kurva
-yang bergerigi naik-turun akan menandakan kebetulan; yang monoton begitu menandakan efek nyata.
+Kurva arsipnya **monoton**: makin ketat filternya, makin baik per trade (PF 1,03 -> 1,56). Kurva
+yang bergerigi naik-turun akan menandakan kebetulan; kurva monoton ini dulu ditafsirkan sebagai efek nyata, tetapi belum diuji ulang dengan simulator yang sudah diperbaiki.
 
 ### Apakah ini lebih baik daripada sekadar mematikan LONG?
 
-Ini uji terpenting, dan jawabannya **ya**:
+Ini uji terpenting pada arsip, dan jawabannya **ya pada data arsip**:
 
 | Skenario | Trade | expR | PF |
 |---|---|---|---|
@@ -156,23 +152,22 @@ Ini uji terpenting, dan jawabannya **ya**:
 | Filter slope ≥ 30, dua arah | 1636 | +0,065 | 1,12 |
 | **Filter slope ≥ 100, dua arah** | **890** | **+0,155** | **1,26** |
 
-Filter 100 mengalahkan "buang LONG", jadi nilainya bukan cuma menyaring arah — ia juga
+Pada arsip, filter 100 mengalahkan "buang LONG", jadi nilainya bukan cuma menyaring arah, ia juga
 menyaring SHORT saat pasar tidak sedang turun.
 
 ### Signifikansi dan ketahanan
 
 | Uji | Hasil |
 |---|---|
-| Bootstrap CI 95%, min_slope 100 | **expR +0,155, CI [+0,050, +0,261]** → signifikan |
-| Bootstrap CI 95%, min_slope 130 | +0,165, CI [+0,045, +0,294] → signifikan |
-| Bootstrap CI 95%, min_slope 160 | +0,206, CI [+0,058, +0,359] → signifikan |
-| `regime_slope_bars` 100 / 200 / 400 | expR +0,090 / +0,065 / +0,060 (min_slope 30) → stabil |
-| Walk-forward 60%/40%, min_slope 100 | IS +0,105 R → OOS +0,262 R |
-| Per simbol (min_slope 100) | kelima simbol positif (PF 1,07–1,45) |
-| LONG vs SHORT | LONG +0,147, SHORT +0,159 → **dua arah seimbang** |
+| Bootstrap CI 95%, min_slope 100 | **expR +0,155, CI [+0,050, +0,261]** -> indikasi arsip |
+| Bootstrap CI 95%, min_slope 130 | +0,165, CI [+0,045, +0,294] -> indikasi arsip |
+| Bootstrap CI 95%, min_slope 160 | +0,206, CI [+0,058, +0,359] -> indikasi arsip |
+| `regime_slope_bars` 100 / 200 / 400 | expR +0,090 / +0,065 / +0,060 (min_slope 30) -> stabil pada arsip |
+| Walk-forward 60%/40%, min_slope 100 | IS +0,105 R -> OOS +0,262 R (arsip, seleksi lama melihat OOS) |
+| Per simbol (min_slope 100) | kelima simbol positif (PF 1,07-1,45) |
+| LONG vs SHORT | LONG +0,147, SHORT +0,159 -> **dua arah seimbang pada arsip** |
 
-Berbeda dari versi tanpa filter, di sini LONG dan SHORT sama-sama positif. Itu tanda filter
-benar-benar menyeleksi rezim, bukan cuma memihak arah yang sedang menang.
+Berbeda dari versi tanpa filter, pada arsip ini LONG dan SHORT sama-sama positif. Itu dulu dibaca sebagai tanda filter menyeleksi rezim, bukan cuma memihak arah yang sedang menang.
 
 ### Biaya perdagangan (risiko yang harus dibaca)
 
@@ -180,8 +175,8 @@ Filter ini memblokir **85% sinyal** (5109 dari 6000). Frekuensi turun menjadi ~1
 bulan per simbol, artinya ~1,7 trade/hari untuk 5 simbol. Konsekuensinya:
 
 - Butuh waktu jauh lebih lama untuk mengumpulkan sampel. 890 trade = ~10 bulan data.
-- Dalam periode pendek (1–2 minggu testnet), bisa saja **nol trade**. Itu normal, bukan kerusakan.
-- Bila `min_slope` dinaikkan ke 160–200, frekuensi menjadi 6–9 trade/bulan/simbol.
+- Dalam periode pendek (1-2 minggu testnet), bisa saja **nol trade**. Itu normal, bukan kerusakan.
+- Bila `min_slope` dinaikkan ke 160-200, frekuensi menjadi 6-9 trade/bulan/simbol.
 
 ### Hasil akhir pada dua rentang data
 
@@ -230,27 +225,32 @@ Gerbang `efisiensi >= X` dipasang setelah filter rezim:
 | 0,10 | 530 | +0,191 | +120,0 | 1,39 |
 | 0,12 | 416 | +0,163 | +75,6 | 1,32 |
 
-Puncaknya di 0,08 lalu turun. Kurva naik-turun menandakan sebagian hasil itu kebetulan, jadi jangan menganggap 0,08 sebagai angka keramat.
+Pada arsip, puncaknya di 0,08 lalu turun. Kurva naik-turun menandakan sebagian hasil itu kebetulan, jadi jangan menganggap 0,08 sebagai angka keramat.
 
-Uji ketahanan pada 0,08: 4 dari 5 simbol membaik (BTC +0,042, BCH +0,050, XRP +0,166, DOGE +0,006, ETH -0,007), dan kedua paruh waktu membaik (+0,033 dan +0,044). CI 95%: [+0,076, +0,332] berbanding [+0,051, +0,260] sekarang. Keduanya signifikan, tapi irisan CI-nya masih lebar, jadi peningkatannya belum bisa disebut pasti.
+Uji ketahanan pada 0,08: 4 dari 5 simbol membaik (BTC +0,042, BCH +0,050, XRP +0,166, DOGE +0,006, ETH -0,007), dan kedua paruh waktu membaik (+0,033 dan +0,044). CI 95%: [+0,076, +0,332] berbanding [+0,051, +0,260] sekarang. Keduanya terlihat positif pada arsip, tapi irisan CI-nya masih lebar, jadi peningkatannya belum bisa disebut pasti.
 
 **Belum diterapkan ke bot.** Alasannya: efisiensi pergerakan bukan bagian dari indikator Pine, dan menambahkannya membuat sinyal makin jauh dari chart. Butuh keputusan Anda.
 
 ## 8. Yang tidak dimodelkan
 
-- Tidak ada order yang ditolak exchange, requote, atau kegagalan Algo Order API.
-- Tidak ada funding fee (posisi di sini ditutup dalam hitungan jam, dampaknya kecil tapi tidak nol).
-- Slippage tetap 1 bps; pada berita atau saat spread melebar, angka nyata bisa 3–5 bps.
-- Fee maker 0,02% **belum bisa dipakai bot ini**: entry dan exit saat ini memakai MARKET
-  (taker). Untuk mendapat maker, bot perlu jalur order limit + logika "batalkan kalau tidak
-  terisi dalam N detik", dan itu belum ada.
-- Hanya 5m yang diuji cukup dalam. 15m/30m/1h punya sinyal terlalu sedikit (66–453) untuk diuji.
+- Tidak ada order yang ditolak exchange, requote, partial fill, atau kegagalan Algo Order API.
+- Tidak ada funding fee. Posisi arsip ditutup dalam hitungan jam, tetapi dampaknya tetap tidak nol pada akun live.
+- Slippage sudah menggeser harga fill entry dan exit pada simulator sekarang. Namun nilainya tetap dan tidak mengikuti spread, kedalaman buku, berita, atau latensi.
+- Fee maker 0,02% **belum bisa dipakai bot ini**: entry dan exit saat ini memakai MARKET (taker). Untuk mendapat maker, bot perlu jalur order limit plus logika batal kalau tidak terisi dalam N detik, dan itu belum ada.
+- Hanya 5m yang punya arsip cukup dalam. Interval lain tersedia di CLI setelah perbaikan, tetapi 15m, 30m, 1h, dan seterusnya perlu diverifikasi ulang karena warmup mengikuti `max(market.warmup_bars, strategy.required_bars())`.
+- Bootstrap blok mempertahankan korelasi waktu lokal, tetapi tidak bisa menghilangkan perubahan rezim, korelasi antarsimbol, atau ketergantungan pada satu periode pasar.
 
 ## 9. Cara mengulang
+
+Perintah berikut memakai simulator yang sudah diperbaiki. Hasilnya akan berbeda dari seluruh tabel arsip di atas.
 
 ```bash
 python3 -m tools.tune --days 45 --grid quick --walk-forward
 python3 -m tools.tune --days 45 --grid cost
+python3 -m tools.tune --days 45 --interval 2h --grid quick --top 5
+python3 -m tools.tune --days 45 --grid quick --refresh-cache
 ```
 
-Data di-cache di `/tmp/bt/data.pkl`. Hapus file itu untuk mengunduh ulang data terbaru.
+Cache bukan pickle lagi. Lokasi bawaan `~/.cache/scalpbot/tune-cache.json`, bisa diganti lewat `SCALPBOT_TUNE_CACHE`. Berkas JSON mode 0600 menyimpan schema, sumber, interval, durasi bar, mode, base URL, simbol, hari, warmup, rasio split, dan waktu pengambilan. Cache dengan metadata beda, symlink, atau konstanta non-finite ditolak. Hapus berkas cache atau pakai `--refresh-cache` untuk mengunduh ulang. Gunakan `--cache-max-age-hours` bila perlu membatasi umur cache.
+
+Seleksi grid memakai 65% data pertama; 35% terakhir hanya dipakai saat `--walk-forward`. Simpan output CLI dan metadata cache bila angka baru akan dipakai untuk audit atau keputusan parameter.

@@ -350,7 +350,7 @@ class Trader:
             # Dikosongkan supaya baseline hari baru benar-benar diambil dari exchange.
             self._baseline_day = ""
             # Trade yang dipertahankan tetap menyumbang PnL hari ini, jadi hitungannya
-            # dibawa ke DayStats baru — bukan direset 0 — agar current_realized() utuh.
+            # dibawa ke DayStats baru, bukan direset 0, agar current_realized() utuh.
             self.day = DayStats(day=today, start_equity=self.equity)
             self.day.realized = sum(t.pnl_net for t in kept)
             self.day.trades = len(kept)
@@ -933,11 +933,32 @@ class Trader:
                     self._pending_by_symbol.pop(signal.symbol, None)
 
     def _emergency_close(self, symbol: str, side: str, qty: float, position_key: str) -> None:
+        self.bump_error()
+        reason = "emergency close"
+        self.events.add("CRITICAL", "risk", f"{symbol} close darurat dimulai qty={qty:g}")
         try:
-            self.broker.close_market(symbol, side, qty, "em", position_key=position_key)
-        except BinanceError as exc:
-            self.bump_error()
-            self.events.add("CRITICAL", "order", f"{symbol} close darurat gagal: {exc}")
+            fill = self.broker.emergency_close(symbol, side, qty, "em", position_key=position_key)
+            if not math.isfinite(fill.qty) or fill.qty <= 0:
+                raise BinanceError(-1, "fill close darurat tidak valid", 0, "/fapi/v1/order")
+        except (BinanceError, AttributeError, TypeError) as exc:
+            reason = "emergency close failed"
+            self.events.add(
+                "CRITICAL",
+                "risk",
+                f"{symbol} CLOSE DARURAT GAGAL: {exc}; entry baru dihentikan",
+            )
+            try:
+                self.broker.cancel_all(symbol)
+            except (BinanceError, OSError, AttributeError, TypeError) as cancel_exc:
+                self.events.add("WARNING", "risk", f"{symbol} cancel_all gagal: {cancel_exc}")
+        else:
+            self.events.add(
+                "CRITICAL",
+                "risk",
+                f"{symbol} close darurat berhasil qty={fill.qty:g}; entry baru dihentikan",
+            )
+        with self._lock:
+            self.halted_reason = reason
 
     def _replace_stop(self, pos: ManagedPosition, new_stop: float, tag: str) -> bool:
         if not math.isfinite(new_stop) or new_stop <= 0:

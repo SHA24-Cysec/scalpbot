@@ -11,3 +11,16 @@ state.json
 .vscode/
 .ruff_cache/
 .pytest_cache/
+.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.bak
+*.db
+*.sqlite
+*.sqlite3
+.coverage
+coverage.xml
+dist/
+build/

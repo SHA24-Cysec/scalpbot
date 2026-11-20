@@ -4,26 +4,29 @@ import hashlib
 import hmac
 import logging
 import math
+import re
 import threading
 import time
 from decimal import Decimal
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import requests
 
-from .config import Config
+from .config import SYMBOL_RE, Config, assert_mode_hosts
 from .indicators import Candle
 from .risk import SymbolFilters
+from .security import clean_message, harden_session, parse_proxy, validate_listen_key
 
 log = logging.getLogger("scalpbot.exchange")
 
 
 class BinanceError(RuntimeError):
     def __init__(self, code: int, message: str, status: int = 0, path: str = "") -> None:
-        super().__init__(f"[{code}] {message} ({path} http={status})")
+        safe = clean_message(message)
+        super().__init__(f"[{code}] {safe} ({path} http={status})")
         self.code = code
-        self.message = message
+        self.message = safe
         self.status = status
         self.path = path
 
@@ -54,10 +57,19 @@ def fmt_num(value: Any) -> Optional[str]:
     return text or "0"
 
 
+CLIENT_ALGO_ID_RE = re.compile(r"^[\.A-Z\:/a-z0-9_-]{1,36}$")
+
+
+def _valid_symbol(value: Any) -> bool:
+    return isinstance(value, str) and bool(SYMBOL_RE.fullmatch(value.upper()))
+
+
 class BinanceFuturesClient:
     def __init__(self, cfg: Config, session: Optional[requests.Session] = None) -> None:
+        assert_mode_hosts(cfg)
         self.cfg = cfg
         self.base_url = cfg.base_url().rstrip("/")
+        self.base_host = (urlparse(self.base_url).hostname or "").lower()
         self.key = cfg.api_key() if cfg.needs_credentials() else ""
         self.secret = cfg.api_secret() if cfg.needs_credentials() else ""
         self._lock = threading.Lock()
@@ -70,8 +82,13 @@ class BinanceFuturesClient:
                 "Accept": "application/json",
             }
         )
+        proxy = ""
         if cfg.net.proxy:
-            self._session.proxies.update({"http": cfg.net.proxy, "https": cfg.net.proxy})
+            try:
+                proxy = parse_proxy(cfg.net.proxy)["normalized"]
+            except ValueError as exc:
+                raise BinanceError(-1, f"net.proxy tidak valid: {exc}", 0, "config") from exc
+        harden_session(self._session, proxy)
         self.used_weight_1m = 0
         self.used_weight_limit = 2400
         self.order_count_1m = 0
@@ -102,6 +119,19 @@ class BinanceFuturesClient:
     def _timestamp(self) -> int:
         return int(time.time() * 1000) + self._time_offset_ms
 
+    @staticmethod
+    def _require_symbol(symbol: Any, path: str) -> str:
+        if not _valid_symbol(symbol):
+            raise BinanceError(-1121, "simbol tidak valid", 0, path)
+        return str(symbol).upper()
+
+    @staticmethod
+    def _listen_key_params(key: Any) -> dict[str, str]:
+        try:
+            return {"listenKey": validate_listen_key(key)}
+        except ValueError as exc:
+            raise BinanceError(-1, str(exc), 0, "/fapi/v1/listenKey") from exc
+
     def _sign(self, query: str) -> str:
         return hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()
 
@@ -124,10 +154,10 @@ class BinanceFuturesClient:
             body = {}
         if isinstance(body, dict):
             raw_code = body.get("code", resp.status_code)
-            message = str(body.get("msg", resp.text[:200]))
+            message = clean_message(str(body.get("msg", resp.text[:200])))
         else:
             raw_code = resp.status_code
-            message = resp.text[:200]
+            message = clean_message(resp.text[:200])
         try:
             code = int(raw_code)
         except (TypeError, ValueError):
@@ -165,8 +195,15 @@ class BinanceFuturesClient:
             started = time.time()
             try:
                 with self._lock:
-                    resp = self._session.request(method, url, timeout=self.cfg.api.timeout_s)
+                    resp = self._session.request(
+                        method, url, timeout=self.cfg.api.timeout_s, allow_redirects=False
+                    )
                 self.last_latency_ms = (time.time() - started) * 1000.0
+                final_host = (urlparse(str(getattr(resp, "url", url))).hostname or "").lower()
+                if final_host != self.base_host:
+                    raise BinanceError(-1, "host respons tidak sesuai allowlist", 0, path)
+                if 300 <= resp.status_code < 400:
+                    raise BinanceError(-1, "redirect ditolak", resp.status_code, path)
                 self._track_limits(resp.headers)
                 if resp.status_code in (418, 429) or resp.status_code >= 500:
                     exc = self._error_from_response(resp, path)
@@ -231,12 +268,13 @@ class BinanceFuturesClient:
     def load_filters(self, symbols: list[str]) -> dict[str, SymbolFilters]:
         info = self.exchange_info()
         by_symbol = {
-            s["symbol"]: s
+            s["symbol"].upper(): s
             for s in info.get("symbols", [])
-            if isinstance(s, dict) and isinstance(s.get("symbol"), str)
+            if isinstance(s, dict) and _valid_symbol(s.get("symbol"))
         }
         out: dict[str, SymbolFilters] = {}
         for sym in symbols:
+            sym = self._require_symbol(sym, "/fapi/v1/exchangeInfo")
             raw = by_symbol.get(sym)
             if raw is None:
                 raise BinanceError(-1121, f"simbol {sym} tidak ada di exchangeInfo", 0, "/fapi/v1/exchangeInfo")
@@ -288,19 +326,22 @@ class BinanceFuturesClient:
         return out
 
     def filters(self, symbol: str) -> SymbolFilters:
+        symbol = self._require_symbol(symbol, "/fapi/v1/exchangeInfo")
         if symbol not in self._filters:
             self.load_filters([symbol])
         return self._filters[symbol]
 
     def ticker_24hr(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/fapi/v1/ticker/24hr", retries=2)
-        return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        return [row for row in data if isinstance(row, dict) and _valid_symbol(row.get("symbol"))]
 
     def tradable_symbols(self, quote_asset: str = "USDT") -> list[str]:
         info = self.exchange_info()
         out = []
         for s in info.get("symbols", []) or []:
-            if not isinstance(s, dict) or not isinstance(s.get("symbol"), str):
+            if not isinstance(s, dict) or not _valid_symbol(s.get("symbol")):
                 continue
             if s.get("status") != "TRADING" or s.get("contractType") != "PERPETUAL":
                 continue
@@ -315,6 +356,7 @@ class BinanceFuturesClient:
         return self.load_filters(self.tradable_symbols())
 
     def klines(self, symbol: str, interval: str, limit: int = 500, end_time: Optional[int] = None) -> list[Candle]:
+        symbol = self._require_symbol(symbol, "/fapi/v1/klines")
         raw = self._request(
             "GET",
             "/fapi/v1/klines",
@@ -345,11 +387,13 @@ class BinanceFuturesClient:
         return out
 
     def depth(self, symbol: str, limit: int = 20) -> dict[str, Any]:
+        symbol = self._require_symbol(symbol, "/fapi/v1/depth")
         data = self._request("GET", "/fapi/v1/depth", {"symbol": symbol, "limit": limit}, retries=1)
         return data if isinstance(data, dict) else {}
 
     def mark_price(self, symbol: Optional[str] = None) -> Any:
         if symbol:
+            symbol = self._require_symbol(symbol, "/fapi/v1/premiumIndex")
             return self._request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol}, retries=1)
         return self._request("GET", "/fapi/v1/premiumIndex", retries=1)
 
@@ -370,15 +414,30 @@ class BinanceFuturesClient:
         return data if isinstance(data, dict) else {}
 
     def position_risk(self, symbol: Optional[str] = None) -> list[dict[str, Any]]:
+        if symbol is not None:
+            symbol = self._require_symbol(symbol, "/fapi/v3/positionRisk")
         data = self._request("GET", "/fapi/v3/positionRisk", {"symbol": symbol}, signed=True, retries=2)
-        return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        return [row for row in data if isinstance(row, dict) and _valid_symbol(row.get("symbol"))]
+
+    def position_side_dual(self) -> bool:
+        data = self._request("GET", "/fapi/v1/positionSide/dual", signed=True, retries=2)
+        if not isinstance(data, dict) or "dualSidePosition" not in data:
+            raise BinanceError(-1, "dualSidePosition tidak ada", 0, "/fapi/v1/positionSide/dual")
+        value = data["dualSidePosition"]
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return bool(value)
 
     def set_leverage(self, symbol: str, leverage: int) -> dict[str, Any]:
+        symbol = self._require_symbol(symbol, "/fapi/v1/leverage")
         return self._request(
             "POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, signed=True
         )
 
     def set_margin_type(self, symbol: str, margin_type: str) -> None:
+        symbol = self._require_symbol(symbol, "/fapi/v1/marginType")
         try:
             self._request(
                 "POST",
@@ -392,9 +451,16 @@ class BinanceFuturesClient:
 
     def new_order(self, **params: Any) -> dict[str, Any]:
         clean = {k: v for k, v in params.items() if v is not None}
+        clean["symbol"] = self._require_symbol(clean.get("symbol"), "/fapi/v1/order")
+        close_position = str(clean.get("closePosition", "")).lower() == "true"
+        if close_position and ("quantity" in clean or "reduceOnly" in clean):
+            raise BinanceError(
+                -1102, "closePosition tidak boleh bersama quantity/reduceOnly", 0, "/fapi/v1/order"
+            )
         return self._request("POST", "/fapi/v1/order", clean, signed=True)
 
     def cancel_order(self, symbol: str, order_id: Optional[int] = None, client_id: Optional[str] = None) -> dict[str, Any]:
+        symbol = self._require_symbol(symbol, "/fapi/v1/order")
         return self._request(
             "DELETE",
             "/fapi/v1/order",
@@ -425,13 +491,19 @@ class BinanceFuturesClient:
 
     def new_algo_order(self, **params: Any) -> dict[str, Any]:
         clean = {k: v for k, v in params.items() if v is not None}
+        clean["symbol"] = self._require_symbol(clean.get("symbol"), "/fapi/v1/algoOrder")
         clean.setdefault("algoType", "CONDITIONAL")
+        clean.setdefault("newOrderRespType", "RESULT")
+        client_id = clean.get("clientAlgoId")
+        if client_id is not None and not CLIENT_ALGO_ID_RE.fullmatch(str(client_id)):
+            raise BinanceError(-1102, "clientAlgoId tidak valid", 0, "/fapi/v1/algoOrder")
         data = self._request("POST", "/fapi/v1/algoOrder", clean, signed=True)
         return data if isinstance(data, dict) else {}
 
     def cancel_algo_order(
         self, symbol: str, algo_id: Optional[str] = None, client_id: Optional[str] = None
     ) -> dict[str, Any]:
+        symbol = self._require_symbol(symbol, "/fapi/v1/algoOrder")
         if algo_id is not None:
             try:
                 algo_id = int(algo_id)
@@ -444,22 +516,30 @@ class BinanceFuturesClient:
         return data if isinstance(data, dict) else {}
 
     def cancel_all_algo(self, symbol: str) -> Any:
+        symbol = self._require_symbol(symbol, "/fapi/v1/algoOpenOrders")
         return self._request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol}, signed=True)
 
     def open_algo_orders(self, symbol: Optional[str] = None) -> list[dict[str, Any]]:
+        if symbol is not None:
+            symbol = self._require_symbol(symbol, "/fapi/v1/openAlgoOrders")
         data = self._request(
             "GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol}, signed=True, retries=2
         )
         if isinstance(data, list):
-            return [row for row in data if isinstance(row, dict)]
-        if isinstance(data, dict):
+            rows = data
+        elif isinstance(data, dict):
             rows = data.get("orders") or data.get("rows") or []
-            return [row for row in rows if isinstance(row, dict)]
-        return []
+        else:
+            return []
+        return [
+            row for row in rows
+            if isinstance(row, dict) and (row.get("symbol") is None or _valid_symbol(row.get("symbol")))
+        ]
 
     def query_algo_order(
         self, symbol: str, algo_id: Optional[str] = None, client_id: Optional[str] = None
     ) -> dict[str, Any]:
+        symbol = self._require_symbol(symbol, "/fapi/v1/algoOrder")
         data = self._request(
             "GET",
             "/fapi/v1/algoOrder",
@@ -470,13 +550,17 @@ class BinanceFuturesClient:
         return data if isinstance(data, dict) else {}
 
     def cancel_all(self, symbol: str) -> Any:
+        symbol = self._require_symbol(symbol, "/fapi/v1/allOpenOrders")
         return self._request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol}, signed=True)
 
     def open_orders(self, symbol: Optional[str] = None) -> list[dict[str, Any]]:
+        if symbol is not None:
+            symbol = self._require_symbol(symbol, "/fapi/v1/openOrders")
         data = self._request("GET", "/fapi/v1/openOrders", {"symbol": symbol}, signed=True, retries=2)
         return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
 
     def query_order(self, symbol: str, order_id: Optional[int] = None, client_id: Optional[str] = None) -> dict[str, Any]:
+        symbol = self._require_symbol(symbol, "/fapi/v1/order")
         return self._request(
             "GET",
             "/fapi/v1/order",
@@ -488,15 +572,16 @@ class BinanceFuturesClient:
     def listen_key_create(self) -> str:
         data = self._request("POST", "/fapi/v1/listenKey", signed=False)
         key = str(data.get("listenKey", "")) if isinstance(data, dict) else ""
-        if not key:
-            raise BinanceError(-1, "listenKey kosong", 0, "/fapi/v1/listenKey")
-        return key
+        try:
+            return validate_listen_key(key)
+        except ValueError as exc:
+            raise BinanceError(-1, str(exc), 0, "/fapi/v1/listenKey") from exc
 
     def listen_key_keepalive(self, key: str) -> None:
-        self._request("PUT", "/fapi/v1/listenKey", {"listenKey": key}, signed=False)
+        self._request("PUT", "/fapi/v1/listenKey", self._listen_key_params(key), signed=False)
 
     def listen_key_delete(self, key: str) -> None:
-        self._request("DELETE", "/fapi/v1/listenKey", {"listenKey": key}, signed=False)
+        self._request("DELETE", "/fapi/v1/listenKey", self._listen_key_params(key), signed=False)
 
     def server_time_ms(self) -> int:
         return self._timestamp()

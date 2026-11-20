@@ -36,7 +36,8 @@ class RecordingClient:
         return {"algoId": algo_id, "algoStatus": "NEW", "clientAlgoId": params.get("clientAlgoId")}
 
     def open_algo_orders(self, symbol=None):
-        return [row for row in self.open_rows if symbol is None or row.get("symbol") in (None, symbol)]
+        rows = list(self.open_rows) + list(self.algo_orders)
+        return [row for row in rows if symbol is None or row.get("symbol") in (None, symbol)]
 
     def cancel_algo_order(self, symbol, algo_id=None, client_id=None):
         self.cancelled.append((symbol, str(algo_id) if algo_id is not None else client_id))
@@ -355,6 +356,10 @@ class TestAlgoUpdateEvent(unittest.IsolatedAsyncioTestCase):
         from scalpbot.app import ScalpBotApp
 
         app = ScalpBotApp.__new__(ScalpBotApp)
+        import threading
+
+        app._universe_lock = threading.RLock()
+        app.symbols = {"BTCUSDT": object(), "ETHUSDT": object()}
         app.trader = unittest.mock.MagicMock()
         app.trader.sync_with_exchange = unittest.mock.MagicMock(return_value=None)
         from scalpbot.events import EventLog

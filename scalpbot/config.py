@@ -10,6 +10,17 @@ from pathlib import Path
 from typing import Any, get_args, get_origin, get_type_hints
 from urllib.parse import urlparse
 
+from .security import (
+    ALLOWED_IP_HOSTS,
+    ALLOWED_LIVE_REST_HOSTS,
+    ALLOWED_LIVE_WS_HOSTS,
+    ALLOWED_TESTNET_REST_HOSTS,
+    ALLOWED_TESTNET_WS_HOSTS,
+    parse_proxy,
+    resolve_under,
+    validate_url,
+)
+
 INTERVALS = {
     "1m", "3m", "5m", "15m", "30m",
     "1h", "2h", "4h", "6h", "8h", "12h", "1d",
@@ -35,7 +46,7 @@ class ConfigError(ValueError):
 @dataclass
 class ApiConfig:
     key_env: str = "BINANCE_API_KEY"
-    secret_env: str = "BINANCE_API_SECRET"
+    secret_env: str = "BINANCE_API_SECRET"  # noqa: RUF100, S105
     recv_window_ms: int = 5000
     base_url_testnet: str = "https://testnet.binancefuture.com"
     base_url_live: str = "https://fapi.binance.com"
@@ -131,6 +142,7 @@ class NetConfig:
     ip_check: bool = True
     ip_check_interval_s: int = 600
     ip_url: str = "https://api.ipify.org"
+    ip_fallback: bool = False
     proxy: str = ""
 
 
@@ -206,6 +218,30 @@ class Config:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def validate_urls(cfg: Config) -> None:
+    try:
+        validate_url(cfg.api.base_url_live, "api.base_url_live", "https", ALLOWED_LIVE_REST_HOSTS)
+        validate_url(
+            cfg.api.base_url_testnet, "api.base_url_testnet", "https", ALLOWED_TESTNET_REST_HOSTS
+        )
+        validate_url(cfg.api.ws_live, "api.ws_live", "wss", ALLOWED_LIVE_WS_HOSTS)
+        validate_url(cfg.api.ws_testnet, "api.ws_testnet", "wss", ALLOWED_TESTNET_WS_HOSTS)
+        validate_url(cfg.net.ip_url, "net.ip_url", "https", ALLOWED_IP_HOSTS, allow_path=True)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def assert_mode_hosts(cfg: Config) -> None:
+    validate_urls(cfg)
+    rest = (urlparse(cfg.base_url()).hostname or "").lower()
+    ws = (urlparse(cfg.ws_url()).hostname or "").lower()
+    if cfg.mode == "live":
+        if rest not in ALLOWED_LIVE_REST_HOSTS or ws not in ALLOWED_LIVE_WS_HOSTS:
+            raise ConfigError("mode live wajib memakai host live resmi")
+    elif rest not in ALLOWED_TESTNET_REST_HOSTS or ws not in ALLOWED_TESTNET_WS_HOSTS:
+        raise ConfigError("mode testnet/paper tidak boleh memakai host live")
 
 
 _SECTIONS = {
@@ -344,6 +380,7 @@ def validate_config(cfg: Config, live_requested: bool = False) -> list[str]:
         raise ConfigError("flag --live dipakai tapi config mode bukan 'live'")
     if cfg.mode == "live" and not live_requested:
         raise ConfigError("mode live butuh flag --live dan konfirmasi eksplisit")
+    assert_mode_hosts(cfg)
 
     if cfg.market.discovery not in DISCOVERY_MODES:
         raise ConfigError(f"market.discovery harus {sorted(DISCOVERY_MODES)}")
@@ -442,8 +479,8 @@ def validate_config(cfg: Config, live_requested: bool = False) -> list[str]:
 
     if cfg.net.ip_check_interval_s < 60:
         raise ConfigError("net.ip_check_interval_s minimal 60 detik")
-    if not cfg.net.ip_url.startswith("https://"):
-        raise ConfigError("net.ip_url harus https")
+    if not isinstance(cfg.net.ip_fallback, bool):
+        raise ConfigError("net.ip_fallback harus true/false")
 
     a = cfg.api
     if not 0 < a.timeout_s <= 120:
@@ -454,19 +491,14 @@ def validate_config(cfg: Config, live_requested: bool = False) -> list[str]:
         raise ConfigError("api.recv_window_ms harus 1..60000")
     if not a.key_env.strip() or not a.secret_env.strip():
         raise ConfigError("nama env API key/secret tidak boleh kosong")
-    for label, url in (("base_url_testnet", a.base_url_testnet), ("base_url_live", a.base_url_live)):
-        if urlparse(url).scheme != "https":
-            raise ConfigError(f"api.{label} harus https")
-    for label, url in (("ws_testnet", a.ws_testnet), ("ws_live", a.ws_live)):
-        if urlparse(url).scheme != "wss":
-            raise ConfigError(f"api.{label} harus wss")
     if cfg.net.proxy:
-        proxy = cfg.net.proxy if "://" in cfg.net.proxy else f"http://{cfg.net.proxy}"
-        scheme = urlparse(proxy).scheme.lower()
-        if scheme not in {"http", "https", "socks5", "socks5h"}:
-            raise ConfigError("net.proxy harus http/https/socks5 URL")
-        if scheme.startswith("socks5") and importlib.util.find_spec("socks") is None:
-            warnings.append("proxy socks5 butuh PySocks; install requests[socks] atau pakai proxy http")
+        try:
+            proxy = parse_proxy(cfg.net.proxy)
+        except ValueError as exc:
+            raise ConfigError(f"net.proxy: {exc}") from exc
+        cfg.net.proxy = proxy["normalized"]
+        if proxy["type"] == "socks5" and importlib.util.find_spec("socks") is None:
+            raise ConfigError("proxy SOCKS5 butuh PySocks; install requirements.txt lalu coba lagi")
     if cfg.net.ip_check_interval_s > 86_400:
         raise ConfigError("net.ip_check_interval_s maksimal 86400 detik")
     if cfg.orderbook.periodic_snapshot_s < 0:
@@ -499,6 +531,19 @@ def validate_config(cfg: Config, live_requested: bool = False) -> list[str]:
         raise ConfigError("logging.backups harus 0..20")
     if not cfg.logging.file.strip() or not cfg.logging.events_file.strip():
         raise ConfigError("path logging.file/events_file tidak boleh kosong")
+    paths = (
+        ("logging.file", cfg.logging.file),
+        ("logging.events_file", cfg.logging.events_file),
+        ("logging.state_file", cfg.logging.state_file),
+        ("logging.file_for", cfg.logging.file_for(cfg.mode)),
+        ("logging.events_for", cfg.logging.events_for(cfg.mode)),
+        ("logging.state_for", cfg.logging.state_for(cfg.mode)),
+    )
+    for label, raw in paths:
+        try:
+            resolve_under(raw)
+        except (ValueError, OSError) as exc:
+            raise ConfigError(f"{label}: {exc}") from exc
     log_file = Path(cfg.logging.file_for(cfg.mode))
     log_events = Path(cfg.logging.events_for(cfg.mode))
     if log_file == log_events:

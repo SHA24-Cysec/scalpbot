@@ -7,10 +7,12 @@ import shutil
 import signal
 import sys
 import time
+from dataclasses import replace
 from typing import Any, Iterable, Optional
 
 from .config import DashboardConfig
 from .events import Event
+from .security import clean_message
 from .timeutil import format_ts
 
 RESET = "\x1b[0m"
@@ -36,6 +38,27 @@ LEVEL_COLOR = {
     "ERROR": BRIGHT_RED,
     "CRITICAL": BG_RED,
 }
+
+
+def _clean_state(value: Any) -> Any:
+    if isinstance(value, Event):
+        return replace(
+            value,
+            source=clean_message(value.source),
+            message=clean_message(value.message),
+        )
+    if isinstance(value, str):
+        return clean_message(value)
+    if isinstance(value, dict):
+        return {
+            clean_message(k) if isinstance(k, str) else k: _clean_state(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_clean_state(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_clean_state(v) for v in value)
+    return value
 
 
 def _visible(text: str) -> int:
@@ -227,7 +250,7 @@ class Dashboard:
             self._resized = True
             self._last_width, self._last_height = width, height
         self._last_render = now
-        frame = self.build_frame(state, width, height)
+        frame = self.build_frame(_clean_state(state), width, height)
         prefix = "\x1b[2J\x1b[H" if self._resized else "\x1b[H"
         sys.stdout.write(prefix + frame + RESET + "\x1b[J")
         sys.stdout.flush()

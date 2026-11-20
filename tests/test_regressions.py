@@ -10,7 +10,13 @@ from pathlib import Path
 from scalpbot.broker import ProtectionOrders
 from scalpbot.config import Config, ConfigError, load_config, validate_config
 from scalpbot.events import redact
-from scalpbot.risk import SymbolFilters, plan_stops, round_step, size_position, wants_stop_update
+from scalpbot.risk import (
+    SymbolFilters,
+    plan_stops,
+    round_step,
+    size_position,
+    wants_stop_update,
+)
 from scalpbot.trader import ManagedPosition, Trader
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,7 +92,8 @@ class TestConfigHardening(unittest.TestCase):
         self.assertTrue(any("MODE LIVE" in w for w in warnings))
 
     def test_paper_balance_nan_rejected_by_cli(self):
-        result = subprocess.run(
+        cfg_path = self.write_raw("{}")
+        result = subprocess.run(  # noqa: RUF100, S603
             [
                 sys.executable,
                 "-m",
@@ -96,7 +103,7 @@ class TestConfigHardening(unittest.TestCase):
                 "--paper-balance",
                 "nan",
                 "-c",
-                str(ROOT / "config.json"),
+                str(cfg_path),
             ],
             cwd=ROOT,
             capture_output=True,
@@ -168,6 +175,15 @@ class StubBroker:
 
     def replace_stop(self, *args, **kwargs):
         return ProtectionOrders(stop_id="stub")
+
+    def cancel_all(self, symbol):
+        return None
+
+    def emergency_close(self, *args, **kwargs):
+        import time as _time
+
+        from scalpbot.broker import Fill
+        return Fill(order_id="em", avg_price=100.0, qty=1.0, ts=_time.time())
 
     def client(self):
         return None

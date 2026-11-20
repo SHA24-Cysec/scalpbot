@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional
 
+from .config import SYMBOL_RE
 from .risk import SymbolFilters
 
 SELECTED = "selected"
@@ -58,8 +59,8 @@ def select_symbols(
     max_notional_frac: float = 1.0,
     require_affordable: bool = True,
 ) -> Selection:
-    allowed = {s.upper() for s in tradable}
-    blocked = {s.upper() for s in exclude}
+    allowed = {s.upper() for s in tradable if isinstance(s, str) and SYMBOL_RE.fullmatch(s.upper())}
+    blocked = {s.upper() for s in exclude if isinstance(s, str) and SYMBOL_RE.fullmatch(s.upper())}
     cap = (
         equity * max(1, leverage) * max(0.1, max_notional_frac)
         if require_affordable and equity > 0
@@ -69,8 +70,9 @@ def select_symbols(
     candidates: list[Candidate] = []
     seen: set[str] = set()
     for ticker in tickers:
-        symbol = str(ticker.get("symbol", "")).upper()
-        if not symbol:
+        raw_symbol = ticker.get("symbol", "")
+        symbol = str(raw_symbol).upper() if isinstance(raw_symbol, str) else ""
+        if not SYMBOL_RE.fullmatch(symbol):
             continue
         if symbol in seen:
             candidates.append(Candidate(symbol, 0.0, 0.0, SKIP_DUPLICATE))

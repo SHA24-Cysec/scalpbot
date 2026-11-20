@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import statistics
 import sys
 import time
@@ -14,6 +15,7 @@ from .app import INTERVAL_SECONDS, open_bar_start_ms, run_app
 from .timeutil import day_key, day_start_ms, describe_boundary, format_ts, tz_label
 from .config import (
     SYMBOL_ALIASES,
+    SYMBOL_RE,
     Config,
     ConfigError,
     confirmation_from_env,
@@ -26,6 +28,7 @@ from .exchange import BinanceError, BinanceFuturesClient
 from .indicators import Candle
 from .netinfo import IpDetector
 from .orderbook import analyze_depth
+from .security import clean_message, ensure_private_dir, ensure_private_file, resolve_under, safe_print as print
 from .strategy import ScalpPullbackStrategy
 
 log = logging.getLogger("scalpbot.cli")
@@ -59,14 +62,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pnl_p.add_argument("-c", "--config", default="config.json")
     pnl_p.add_argument("--top", type=int, default=8, help="jumlah simbol teratas pada rincian")
+    pnl_p.add_argument("--live", action="store_true", help="izinkan mode live")
 
     book_p = sub.add_parser("bookscan", help="ukur orderbook universe aktif: spread, imbalance, dan peluang lolos filter")
     book_p.add_argument("-c", "--config", default="config.json")
+    book_p.add_argument("--live", action="store_true", help="izinkan mode live")
     book_p.add_argument("--samples", type=int, default=6, help="jumlah sampel per simbol")
     book_p.add_argument("--delay", type=float, default=0.5, help="jeda antar sampel (detik)")
 
     sig_p = sub.add_parser("signals", help="replay sinyal historis untuk dibandingkan dengan TradingView")
     sig_p.add_argument("-c", "--config", default="config.json")
+    sig_p.add_argument("--live", action="store_true", help="izinkan mode live")
     sig_p.add_argument("--symbol", default=None, help="override satu simbol")
     sig_p.add_argument("--bars", type=int, default=1000, help="jumlah bar yang diambil (maks 1500)")
     sig_p.add_argument("--csv", default=None, help="simpan hasil ke file CSV")
@@ -87,6 +93,7 @@ def _load(args: argparse.Namespace) -> tuple[Config, list[str]]:
     if getattr(args, "no_dashboard", False):
         cfg.dashboard.enabled = False
     warnings = validate_config(cfg, live_requested=bool(getattr(args, "live", False)))
+    _authorize_mode(cfg, args)
     return cfg, warnings
 
 
@@ -104,6 +111,19 @@ def _live_gate(cfg, args) -> bool:
     return False
 
 
+def _authorize_mode(cfg: Config, args: argparse.Namespace) -> None:
+    if getattr(args, "paper", False) and getattr(args, "live", False):
+        raise ConfigError("--live dan --paper tidak boleh dipakai bersamaan")
+    if cfg.mode != "live":
+        cfg.live_authorized = False
+        return
+    if not getattr(args, "live", False):
+        raise ConfigError("mode live butuh flag --live pada semua subcommand")
+    if not _live_gate(cfg, args):
+        raise ConfigError("konfirmasi mode live ditolak")
+    cfg.live_authorized = True
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cfg, warnings = _load(args)
     if not math.isfinite(args.paper_balance) or args.paper_balance <= 0:
@@ -116,8 +136,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"API key belum ada. Set env {cfg.api.key_env} dan {cfg.api.secret_env} "
             f"(testnet: https://testnet.binancefuture.com)."
         )
-        return 2
-    if not _live_gate(cfg, args):
         return 2
     return asyncio.run(run_app(cfg, paper_balance=args.paper_balance))
 
@@ -175,7 +193,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         info = "belum ada (akan dibuat saat entry pertama)"
         if state_path.is_file():
             try:
-                blob = json.loads(state_path.read_text(encoding="utf-8"))
+                blob = json.loads(
+                    state_path.read_text(encoding="utf-8"),
+                    parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+                )
                 cooldown = len(blob.get("cooldown") or {})
                 entries = len(blob.get("entries") or [])
                 info = (
@@ -243,7 +264,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"koneksi     : GAGAL {exc}")
             return 1
         if cfg.net.ip_check:
-            det = IpDetector(cfg.net.ip_url, cfg.net.ip_check_interval_s, cfg.net.proxy)
+            det = IpDetector(
+                cfg.net.ip_url,
+                cfg.net.ip_check_interval_s,
+                cfg.net.proxy,
+                fallback=cfg.net.ip_fallback,
+            )
             ip = det.fetch_once()
             print(f"IP publik   : {ip or 'tidak terdeteksi'} (whitelist IP ini di API key bila diaktifkan)")
     finally:
@@ -254,7 +280,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_bookscan(args: argparse.Namespace) -> int:
     """Ukur seberapa sering filter orderbook menolak entry, pakai data depth nyata."""
-    cfg = load_config(args.config)
+    cfg, warnings = _load(args)
+    for w in warnings:
+        print(f"[peringatan] {w}")
     client = BinanceFuturesClient(cfg)
     try:
         filters = client.load_all_filters()
@@ -366,10 +394,12 @@ def cmd_pnl(args: argparse.Namespace) -> int:
 
     Penting dibedakan karena keduanya berbeda 7 jam untuk WIB:
 
-    * **hari bot** (00:00 WIB) — inilah yang dipakai `daily_loss_limit_pct`.
-    * **hari exchange** (00:00 UTC) — inilah yang tampil di aplikasi Binance.
+    * **hari bot** (00:00 WIB), inilah yang dipakai `daily_loss_limit_pct`.
+    * **hari exchange** (00:00 UTC), inilah yang tampil di aplikasi Binance.
     """
-    cfg = load_config(args.config)
+    cfg, warnings = _load(args)
+    for w in warnings:
+        print(f"[peringatan] {w}")
     if cfg.mode == "paper":
         print("mode paper: tidak ada exchange, DAY hanya menghitung sesi berjalan (selalu mulai dari 0).")
         print("Gunakan config testnet/live untuk melihat PnL harian dari Binance.")
@@ -389,7 +419,7 @@ def cmd_pnl(args: argparse.Namespace) -> int:
         return 1
     limit_pct = cfg.risk.daily_loss_limit_pct
     kinds = bot_info["kinds"]
-    print(f"Jendela yang dipakai bot: 00:00 {label} (hari bot) — dasar batas rugi harian")
+    print(f"Jendela yang dipakai bot: 00:00 {label} (hari bot), dasar batas rugi harian")
     print(f"  REALIZED_PNL : {kinds.get('REALIZED_PNL', 0.0):+10.4f} USDT")
     print(f"  COMMISSION   : {kinds.get('COMMISSION', 0.0):+10.4f} USDT  (fee)")
     print(f"  FUNDING_FEE  : {kinds.get('FUNDING_FEE', 0.0):+10.4f} USDT")
@@ -425,11 +455,16 @@ def cmd_pnl(args: argparse.Namespace) -> int:
 
 
 def cmd_signals(args: argparse.Namespace) -> int:
-    cfg = load_config(args.config)
-    validate_config(cfg, live_requested=cfg.mode == "live")
+    cfg, warnings = _load(args)
+    for w in warnings:
+        print(f"[peringatan] {w}")
     if args.symbol:
-        sym = str(args.symbol).strip().upper()
-        symbols = [SYMBOL_ALIASES.get(sym, sym)]
+        sym = clean_message(str(args.symbol).strip()).upper()
+        sym = SYMBOL_ALIASES.get(sym, sym)
+        if not SYMBOL_RE.fullmatch(sym):
+            print("simbol tidak valid")
+            return 2
+        symbols = [sym]
     else:
         symbols = list(cfg.market.symbols)
     client = BinanceFuturesClient(cfg)
@@ -509,13 +544,19 @@ def cmd_signals(args: argparse.Namespace) -> int:
                 f"{len(closed)} bar {cfg.market.interval} (jam {tz_label(cfg.logging.timezone)}){tail}"
             )
         if args.csv and rows:
-            path = Path(args.csv)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8", newline="") as fh:
-                tz_tag = tz_label(cfg.logging.timezone).lower().replace(" ", "_")
-                fh.write(f"time_{tz_tag},symbol,side,close,pac_center,atr,trend\n")
-                for r in rows:
-                    fh.write(",".join(r) + "\n")
+            try:
+                path = resolve_under(args.csv)
+                ensure_private_dir(path.parent)
+                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(path, flags, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                    tz_tag = tz_label(cfg.logging.timezone).lower().replace(" ", "_")
+                    fh.write(clean_message(f"time_{tz_tag},symbol,side,close,pac_center,atr,trend\n"))
+                    for r in rows:
+                        fh.write(",".join(clean_message(cell) for cell in r) + "\n")
+                ensure_private_file(path)
+            except (ValueError, OSError) as exc:
+                raise ConfigError(f"--csv: {exc}") from exc
             print(f"CSV ditulis: {path}")
     except BinanceError as exc:
         print(f"gagal: {exc}")

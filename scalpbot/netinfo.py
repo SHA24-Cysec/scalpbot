@@ -4,18 +4,28 @@ import ipaddress
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests
+
+from .security import ALLOWED_IP_HOSTS, clean_message, harden_session, parse_proxy
 
 log = logging.getLogger("scalpbot.netinfo")
 
 
 class IpDetector:
-    def __init__(self, url: str = "https://api.ipify.org", interval_s: int = 600, proxy: str = "") -> None:
+    def __init__(
+        self,
+        url: str = "https://api.ipify.org",
+        interval_s: int = 600,
+        proxy: str = "",
+        fallback: bool = True,
+    ) -> None:
         self.url = url
         self.interval_s = max(60, interval_s)
         self.proxy = proxy
+        self.fallback = fallback
         self.ip: Optional[str] = None
         self.last_check: float = 0.0
         self.last_error: str = ""
@@ -23,33 +33,60 @@ class IpDetector:
         self._stop = threading.Event()
         self._lock = threading.Lock()
 
+    def _urls(self) -> list[str]:
+        urls = [self.url]
+        if self.fallback:
+            for extra in ("https://ifconfig.me/ip", "https://api.ipify.org"):
+                if extra not in urls:
+                    urls.append(extra)
+        return urls
+
+    @staticmethod
+    def _host_ok(url: Any) -> bool:
+        try:
+            return (urlparse(str(url or "")).hostname or "").lower() in ALLOWED_IP_HOSTS
+        except (ValueError, TypeError):
+            return False
+
     def fetch_once(self, timeout: float = 6.0) -> Optional[str]:
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        for url in (self.url, "https://ifconfig.me/ip", "https://api.ipify.org"):
+        proxy = ""
+        if self.proxy:
             try:
-                resp = requests.get(
-                    url,
-                    timeout=timeout,
-                    proxies=proxies,
-                    headers={"User-Agent": "curl/8", "Accept": "text/plain"},
-                )
-                if resp.status_code == 200:
-                    text = resp.text.strip().splitlines()[0].strip()
-                    try:
-                        ipaddress.ip_address(text)
-                        valid = True
-                    except ValueError:
-                        valid = False
-                    if valid:
-                        with self._lock:
-                            self.ip = text
-                            self.last_check = time.time()
-                            self.last_error = ""
-                        return text
-            except requests.RequestException as exc:
-                with self._lock:
-                    self.last_error = type(exc).__name__
-                continue
+                proxy = parse_proxy(self.proxy)["normalized"]
+            except ValueError as exc:
+                self.last_error = clean_message(str(exc))
+                return None
+        session = requests.Session()
+        harden_session(session, proxy)
+        try:
+            for url in self._urls():
+                if not self._host_ok(url):
+                    continue
+                try:
+                    resp = session.get(
+                        url,
+                        timeout=timeout,
+                        headers={"User-Agent": "curl/8", "Accept": "text/plain"},
+                        allow_redirects=False,
+                    )
+                    if resp.status_code != 200 or not self._host_ok(resp.url):
+                        continue
+                    lines = resp.text.strip().splitlines()
+                    text = lines[0].strip() if lines else ""
+                    if not text:
+                        continue
+                    ipaddress.ip_address(text)
+                    with self._lock:
+                        self.ip = text
+                        self.last_check = time.time()
+                        self.last_error = ""
+                    return text
+                except (requests.RequestException, ValueError, OSError, IndexError, AttributeError) as exc:
+                    with self._lock:
+                        self.last_error = clean_message(f"{type(exc).__name__}: {exc}")
+                    continue
+        finally:
+            session.close()
         return None
 
     def start(self) -> None:

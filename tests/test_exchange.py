@@ -7,12 +7,13 @@ from scalpbot.exchange import BinanceError, BinanceFuturesClient, RateLimited
 
 
 class FakeResponse:
-    def __init__(self, status=200, body=None, headers=None, text=""):
+    def __init__(self, status=200, body=None, headers=None, text="", url=""):
         self.status_code = status
         self._body = body if body is not None else {}
         self.headers = headers or {}
         self.content = b"{}" if body is not None else b""
         self.text = text
+        self.url = url
 
     def json(self):
         return self._body
@@ -24,12 +25,18 @@ class FakeSession:
         self.calls = []
         self.headers = {}
         self.proxies = {}
+        self.trust_env = False
+        self.verify = True
 
-    def request(self, method, url, data=None, timeout=None):
-        self.calls.append({"method": method, "url": url, "data": data, "timeout": timeout})
+    def request(self, method, url, data=None, timeout=None, **kwargs):
+        self.calls.append(
+            {"method": method, "url": url, "data": data, "timeout": timeout, "kwargs": kwargs}
+        )
         if not self.responses:
             raise AssertionError("tidak ada respons lagi")
-        return self.responses.pop(0)
+        resp = self.responses.pop(0)
+        resp.url = url
+        return resp
 
     def close(self):
         return None

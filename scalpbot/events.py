@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
+import os
 import sys
 import threading
 import time
@@ -11,20 +11,25 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
-SECRET_PATTERNS = [
-    re.compile(r'(?i)(api[_-]?key"?\s*[:=]\s*")[^"]+'),
-    re.compile(r'(?i)(secret"?\s*[:=]\s*")[^"]+'),
-    re.compile(r"(?i)(signature=)[a-f0-9]{32,}"),
-    re.compile(r'(?i)(x-mbx-apikey"?\s*[:=]\s*)([a-z0-9]{16,})'),
-    re.compile(r"\b[A-Za-z0-9]{64,}\b"),
-]
+from .security import (
+    RedactingFormatter,
+    ensure_private_dir,
+    ensure_private_file,
+    redact,
+)
 
 
-def redact(text: str) -> str:
-    out = str(text)
-    for pat in SECRET_PATTERNS[:4]:
-        out = pat.sub(lambda m: m.group(1) + "***", out)
-    return SECRET_PATTERNS[4].sub("***", out)
+def clean_message(text: str) -> str:
+    return redact(text)
+
+
+_audit_log = logging.getLogger("scalpbot.events.audit")
+_audit_log.propagate = False
+_audit_log.setLevel(logging.WARNING)
+if not _audit_log.handlers:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(RedactingFormatter("%(levelname)s %(name)s | %(message)s"))
+    _audit_log.addHandler(handler)
 
 
 @dataclass(slots=True)
@@ -36,7 +41,7 @@ class Event:
 
     def as_json(self) -> str:
         d = asdict(self)
-        d["message"] = redact(str(self.message))
+        d["message"] = clean_message(self.message)
         d["iso"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self.ts))
         return json.dumps(d, ensure_ascii=False)
 
@@ -54,13 +59,19 @@ class EventLog:
         self._lock = threading.Lock()
         self._file = Path(file_path) if file_path else None
         self._max_bytes = max(1024, max_bytes)
-        self.mode = str(mode).strip().lower()
+        self.mode = clean_message(str(mode).strip().lower())
         self.console = console
+        self.last_error = ""
         if self._file:
-            self._file.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(self._file.parent)
 
     def add(self, level: str, source: str, message: str) -> Event:
-        ev = Event(ts=time.time(), level=level.upper(), source=source, message=redact(str(message)))
+        ev = Event(
+            ts=time.time(),
+            level=clean_message(str(level).upper()),
+            source=clean_message(str(source)),
+            message=clean_message(message),
+        )
         with self._lock:
             self._events.append(ev)
             if self._file:
@@ -76,17 +87,24 @@ class EventLog:
         return ev
 
     def _write(self, ev: Event) -> None:
-        assert self._file is not None
+        if self._file is None:
+            raise RuntimeError("event log tanpa path file")
         try:
             if self._file.exists() and self._file.stat().st_size > self._max_bytes:
                 rotated = self._file.with_suffix(self._file.suffix + ".1")
                 if rotated.exists():
                     rotated.unlink()
                 self._file.rename(rotated)
-            with self._file.open("a", encoding="utf-8") as fh:
+                ensure_private_file(rotated)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self._file, flags, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
                 fh.write(ev.as_json() + "\n")
-        except OSError:
-            pass
+            ensure_private_file(self._file)
+            self.last_error = ""
+        except (OSError, ValueError) as exc:
+            self.last_error = clean_message(str(exc))
+            _audit_log.error("event log gagal ditulis: %s", exc)
 
     def tail(self, n: int = 10) -> list[Event]:
         with self._lock:

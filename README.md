@@ -103,16 +103,16 @@ Copy-Item config.example.json config.json
 
 Di `cmd.exe` pakai `run.bat check -c config.json`. Kalau perintah `python3` tidak ada di Windows, pakai `python -m scalpbot ...` atau `py -3 -m scalpbot ...`. Semua launcher melakukan `cd` ke folder repo supaya path `logs/` dan `config.json` relatif tetap benar.
 
-Versi dependensi dipatok ke rilis terbaru PyPI saat paket ini dibuat (requests 2.34.2, websocket-client 1.9.2, dicek dari `pypi.org/pypi/<nama>/json` pada 2026-11-16). Sebelum install di PC lain, bandingkan isi `requirements.txt` dengan versi yang Anda inginkan; jangan menambah paket tanpa audit.
+Versi dependensi dipatok ke rilis PyPI yang diverifikasi pada 2026-11-19 (Asia/Jakarta): `requests[socks]==2.34.2`, `websocket-client==1.9.2`, dan `PySocks==1.7.1`. Extra `socks` serta deklarasi PySocks memastikan proxy SOCKS5 tidak lagi bergantung pada paket yang kebetulan terpasang. Sebelum install di PC lain, bandingkan isi `requirements.txt` dengan versi yang Anda inginkan; jangan menambah paket tanpa audit.
 
 ### Checklist sebelum dijalankan di PC lokal
 
 1. `python -m scalpbot check -c config.json`. Ini memeriksa tipe dan batas semua config, koneksi REST, offset jam, kandidat `top_volume`, filter simbol, dan IP publik.
 2. Samakan jam PC (NTP). Bot menyinkronkan offset ke server Binance saat start, tapi selisih lebih dari 60 detik tetap dicatat sebagai peringatan.
 3. Pakai Windows Terminal atau terminal dengan VT processing. Kalau ANSI tidak bisa diaktifkan, dashboard otomatis mati dan log dialihkan ke stderr.
-4. Bila jaringan memakai proxy, isi `net.proxy` dengan URL `http://`, `https://`, atau `socks5://`. Proxy yang sama dipakai REST dan WebSocket. SOCKS5 butuh PySocks untuk WebSocket; tanpanya koneksi WS langsung, jadi cek event `ws` bila status `DOWN`.
+4. Bila jaringan memakai proxy, isi `net.proxy` dengan URL `http://`, `https://`, `socks5://`, atau `socks5h://`. Proxy yang sama dipakai REST dan WebSocket. Port, skema, dan kredensial divalidasi; SOCKS5 tanpa PySocks membuat start gagal, bukan jatuh ke koneksi langsung. Proxy dari `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` diabaikan bila `net.proxy` kosong; `REQUESTS_CA_BUNDLE` tetap dipakai untuk CA bundle eksplisit.
 5. Jalankan dulu `--paper --paper-balance 50` dan `--no-dashboard` untuk melihat log tanpa layar alternatif.
-6. Simpan API key di environment variable, bukan di config. `check` menampilkan IP yang perlu dimasukkan ke whitelist.
+6. Simpan API key di environment variable, bukan di config. `check` menampilkan IP yang perlu dimasukkan ke whitelist. Fallback ke layanan IP lain dimatikan secara bawaan lewat `net.ip_fallback=false`.
 
 ---
 
@@ -137,7 +137,7 @@ Perintah `check` menampilkan base URL, offset waktu server, kandidat `top_volume
 
 Testnet punya aturan minimum notional sendiri (BTCUSDT di testnet = 50 USDT, beberapa altcoin = 5 USDT). Bot membaca angka ini dari `exchangeInfo`, bukan hardcode.
 
-Catatan URL testnet: konfigurasi bawaan memakai `https://testnet.binancefuture.com` dan `wss://fstream.binancefuture.com`, diverifikasi masih merespons dari workspace pada 2026-11-16. Dokumentasi Binance `General Info` yang diambil pada tanggal sama mencantumkan testnet baru `https://demo-fapi.binance.com` dan `wss://demo-fstream.binance.com`. Kalau URL lama sudah tidak tersedia dari jaringan Anda, ganti `api.base_url_testnet` dan `api.ws_testnet` sesuai dokumentasi tersebut, lalu jalankan `check` lagi.
+Catatan URL testnet, diverifikasi 2026-11-19 (Asia/Jakarta): config bawaan memakai `https://testnet.binancefuture.com` dan `wss://fstream.binancefuture.com`, pasangan yang masih dipakai katalog Trade/User Data Streams dan masih merespons 200 dari workspace. `General Info` mencantumkan pasangan Demo Trading `https://demo-fapi.binance.com` dan `wss://demo-fstream.binance.com`; pasangan ini juga ada dalam allowlist. Dari workspace `demo-fapi` membalas 451 karena pembatasan wilayah, jadi uji dari lokasi Anda sebelum mengganti kedua nilai sekaligus, lalu jalankan `check` lagi. Host di luar allowlist ditolak sebelum request dikirim; mode live tidak bisa memakai host testnet dan mode testnet tidak bisa memakai host live.
 
 ---
 
@@ -258,7 +258,7 @@ Untuk scalp lebih rapat, contoh di dokumen Pine: PAC 21 dengan EMA 55/144/377, a
 
 | Kunci | Default | Arti |
 |---|---|---|
-| `risk_pct` | 1.5 | Risiko per trade terhadap equity, **0.01–100**. Nilai > batas notional akan dipotong (lihat "Batas risiko efektif") |
+| `risk_pct` | 1.5 | Risiko per trade terhadap equity, **0.01-100**. Nilai > batas notional akan dipotong (lihat "Batas risiko efektif") |
 | `leverage` | 10 | Leverage yang diset ke exchange |
 | `margin_type` | ISOLATED | `ISOLATED` atau `CROSSED` |
 | `max_open_positions` | 3 | Total posisi bersamaan |
@@ -325,8 +325,8 @@ Contoh nyata dengan leverage 10 dan `max_notional_frac_equity` 1.0:
 |---|---|---|---|
 | 94 bps | 1.5% | 128 USDT | 1,5% (utuh) |
 | 94 bps | 10% | 960 USDT | 9,0% (utuh) |
-| 94 bps | 100% | 960 USDT | **9,0%** — dipotong, bukan 100% |
-| 250 bps | 100% | 980 USDT | **24,5%** — dipotong |
+| 94 bps | 100% | 960 USDT | **9,0%**, dipotong, bukan 100% |
+| 250 bps | 100% | 980 USDT | **24,5%**, dipotong |
 
 Bot tidak lagi memotong diam-diam. Kalau qty dibatasi notional:
 
@@ -359,8 +359,8 @@ Artinya modal 10 USDT sudah cukup; `risk_pct` naik sampai batas notional. Bila n
 | api | `timeout_s` | 10 | Timeout REST per request, 0..120 detik |
 | api | `max_retries` | 3 | Batas atas percobaan GET saat 429/5xx atau error jaringan |
 | api | `recv_window_ms` | 5000 | Jendela validitas request bertanda tangan |
-| api | `base_url_testnet` / `base_url_live` | testnet / fapi | Wajib `https` |
-| api | `ws_testnet` / `ws_live` | fstream | Wajib `wss` |
+| api | `base_url_testnet` / `base_url_live` | testnet / fapi | Wajib `https` dan host allowlist; mode live tidak bisa di-override ke testnet |
+| api | `ws_testnet` / `ws_live` | fstream | Wajib `wss` dan host allowlist; pasangan demo resmi diizinkan |
 | orderbook | `min_imbalance` | 0.05 | Long butuh bid volume 5% lebih besar dari ask pada top N level. Default lama 0.15 memblokir ~63% entry |
 | orderbook | `periodic_snapshot_s` | 0 | 0 berarti depth hanya diambil saat ada sinyal |
 | orderbook | `max_age_s` | 15 | Snapshot lebih tua dari ini ditolak saat entry |
@@ -370,7 +370,8 @@ Artinya modal 10 USDT sudah cukup; `risk_pct` naik sampai batas notional. Bila n
 | execution | `cancel_replace_min_s` | 2.0 | Jeda minimal antar cancel-replace SL |
 | execution | `max_slippage_bps` | 25.0 | Spread maksimum saat entry |
 | net | `ip_check` | true | Deteksi IP publik |
-| net | `proxy` | "" | URL `http`/`https`/`socks5`, dipakai REST dan WS |
+| net | `proxy` | "" | URL `http`/`https`/`socks5`/`socks5h`, dipakai REST dan WS; SOCKS5 butuh PySocks dan gagal tertutup |
+| net | `ip_fallback` | false | Jika true, coba `ifconfig.me` dan `api.ipify.org` setelah `ip_url` gagal |
 | dashboard | `min_width` / `min_height` | 72 / 22 | Di bawah ini tampil pesan perbesar terminal |
 | dashboard | `log_lines` | 8 | Baris event log, 1..50 |
 | dashboard | `history_lines` | 5 | Baris panel riwayat entry, 0..20 (0 = panel disembunyikan) |
@@ -680,7 +681,7 @@ Yang **tidak** ikut dan tidak boleh ikut:
 
 | Bagian | Alasan |
 |---|---|
-| jendela PnL `/fapi/v1/income` | Binance memakai 00:00 UTC. Menggeser ke WIB membuat `DAY` tidak cocok dengan aplikasi Binance dan berisiko melewatkan rugi antara 00:00–07:00 WIB |
+| jendela PnL `/fapi/v1/income` | Binance memakai 00:00 UTC. Menggeser ke WIB membuat `DAY` tidak cocok dengan aplikasi Binance dan berisiko melewatkan rugi antara 00:00-07:00 WIB |
 | timestamp candle dari exchange (ms) | selalu UTC, dipakai untuk perhitungan bar |
 | `saved_at` di berkas state | metadata internal, sengaja UTC supaya konsisten antar mesin |
 
@@ -754,16 +755,17 @@ Catatan implementasi:
 
 ## 12. Pengamanan
 
-- API key hanya dari environment variable, tidak pernah ditulis ke config atau log.
-- Mode live butuh kombinasi config `mode: live`, flag `--live`, dan konfirmasi env/terminal.
-- Semua order keluar memakai `reduceOnly=true`, jadi tidak bisa membalik arah posisi.
-- Kalau SL gagal terpasang setelah entry, posisi langsung ditutup darurat.
-- Tiap `reconcile_s` bot memeriksa apakah SL masih ada di exchange; kalau hilang, SL dipasang ulang.
-- Kalau ada posisi di exchange yang tidak dikenal bot (dibuka manual), bot memberi peringatan dan tidak mengelolanya.
+- API key hanya dari environment variable. Semua sink keluaran (file teknis, event JSONL, console, dashboard, dan CSV) melewati redaksi untuk secret pendek maupun panjang, signature HMAC, JWT, kredensial proxy, dan token 64 karakter atau lebih; karakter kontrol/ANSI dibuang.
+- Endpoint REST/WS dan layanan deteksi IP memakai allowlist host. Redirect dimatikan, host respons diperiksa, dan proxy environment diabaikan kecuali `net.proxy` diisi eksplisit. Config tidak bisa mengarahkan `mode=testnet` ke host live atau sebaliknya.
+- Mode live butuh config `mode: live`, flag `--live` pada **semua** subcommand, dan konfirmasi env `SCALPBOT_LIVE_CONFIRM=YES-LIVE` **atau** konfirmasi terminal `LIVE`. Konfirmasi terminal kini benar-benar cukup. Semua subcommand memakai satu `_load` + otorisasi mode; `pnl`, `bookscan`, dan `signals` tidak lagi melewati validasi.
+- Akun Hedge Mode ditolak saat preflight lewat `GET /fapi/v1/positionSide/dual`; bot hanya mendukung One-way Mode. Order keluar memakai `reduceOnly=true`; entry tidak reduceOnly secara sengaja.
+- Algo SL/TP meminta `newOrderRespType=RESULT`, lalu segera diverifikasi lewat `GET /fapi/v1/openAlgoOrders?symbol=`. Bila `algoId`/`clientAlgoId` tidak ditemukan atau statusnya bukan aktif, pemasangan dianggap gagal.
+- Respons close dengan `executedQty=0` tidak lagi dianggap terisi. Kalau SL gagal terpasang setelah entry, jalur darurat mencoba close berulang, fallback `closePosition=true`, dan verifikasi `/fapi/v3/positionRisk`. Kegagalan akhir menulis event CRITICAL dan menghentikan entry baru, bukan sekadar dicatat.
+- `check_orphan_protection` berjalan setiap `max(20, reconcile_s)` detik, bukan tepat setiap `reconcile_s`.
+- Posisi yang sudah ada di exchange **diadopsi** bila `risk.adopt_existing=true`; bila false, bot memberi peringatan dan tidak mengelolanya.
 - `daily_loss_limit_pct` menghentikan entry baru setelah ambang rugi harian. Reset hariannya mengikuti `logging.timezone` (default **WIB**, jadi 00:00 WIB), sedangkan jendela PnL dari Binance tetap 00:00 UTC. Angkanya tidak hanya dari sesi berjalan: sekali per hari bot membaca `/fapi/v1/income` (weight 100) untuk `REALIZED_PNL` + `COMMISSION` + `FUNDING_FEE` sejak 00:00 UTC (= 07:00 WIB), lalu memakai total itu sebagai dasar. Karena itu kolom `DAY` di dashboard bisa sudah terisi `-6.14 (-0.12%)` sejak detik pertama bot hidup: itu PnL akun hari ini dari Binance, bukan PnL sesi. Restart, pindah PC, atau folder `logs/` yang terhapus tidak mengembalikan jatah rugi harian ke nol.
-- Semua input config divalidasi tipenya dan batas nilainya sebelum bot start, termasuk nilai `NaN`/`Infinity`.
-- Bila `top_volume` tidak menghasilkan kandidat, bot memakai fallback `market.symbols` dan mencatat peringatan, bukan langsung berhenti.
-- Log dan event JSONL menyamarkan API key, secret, signature HMAC, dan token alfanumerik 64 karakter atau lebih.
+- Semua input config divalidasi tipenya, batas nilainya, allowlist URL, proxy, dan path sebelum bot start, termasuk nilai `NaN`/`Infinity`. Path log/events/state/CSV dibatasi ke direktori kerja; file log/events/state dibuat mode 0600 dan direktori 0700 pada sistem POSIX. State JSON menolak `NaN`/`Infinity` saat baca maupun tulis.
+- Bila `top_volume` tidak menghasilkan kandidat, bot memakai fallback `market.symbols` dan mencatat peringatan, bukan langsung berhenti. Simbol dari config maupun exchange harus cocok dengan regex `^[A-Z0-9]{5,20}$`.
 - Snapshot orderbook yang lebih tua dari `orderbook.max_age_s` tidak dipakai untuk keputusan entry.
 - Bila cancel-replace SL gagal di tengah jalan, broker mencoba memasang kembali SL di harga sebelumnya.
 
@@ -789,7 +791,7 @@ scalpbot/
     netinfo.py      deteksi IP publik
     app.py          orkestrasi asyncio, WebSocket, loop
     __main__.py     CLI: run, check, signals
-  tests/            245 unit test
+  tests/            380 unit test (+35 subtest)
   tools/backtest.py    engine backtest (dipakai bot, bukan simulator terpisah)
   tools/pine_reference.py  transkripsi literal Pine R1.1 untuk uji paritas
   tests/fixtures/btc_5m.json  data nyata untuk uji paritas (tanpa jaringan)
@@ -861,26 +863,25 @@ Hasil pada data uji yang sama:
 | Default baru (SL/TP saja) | 512 | 49.6 | +38.7 | +0.060 | 1.16 |
 | **Default baru + filter rezim** | 891 | 50.4 | **+136.9** | **+0.155** | **1.26** |
 
-Angka filter rezim diukur pada **312 hari** data (Jan–Nov 2026, 90.000 bar per simbol), bukan 62 hari, karena frekuensinya lebih rendah. Pada 62 hari terakhir hasilnya +0,323 R / PF 1,61.
+Angka filter rezim diukur pada **312 hari** data (Jan-Nov 2026, 90.000 bar per simbol), bukan 62 hari, karena frekuensinya lebih rendah. Pada 62 hari terakhir hasilnya +0,323 R / PF 1,61.
 
 ### Baca angka ini dengan benar
 
-- **SL/TP saja belum cukup.** Tanpa filter rezim, +0,060 R punya CI **[-0,068, +0,191]** —
-  belum bisa dibedakan dari nol, dan seluruh profitnya hanya dari SHORT.
+- **SL/TP saja belum cukup.** Tanpa filter rezim, +0,060 R punya CI **[-0,068, +0,191]**, belum bisa dibedakan dari nol, dan seluruh profitnya hanya dari SHORT.
 - **Filter rezim yang membuat beda.** Dengan `regime_min_slope_bps` 100, expR +0,155 dengan
   CI 95% **[+0,050, +0,261]** → signifikan, dan LONG (+0,147) maupun SHORT (+0,159) sama-sama
   positif. Kurva ambangnya monoton (PF 1,03 → 1,56 dari ambang 0 ke 200), bukan bergerigi.
 - **Biayanya: frekuensi turun drastis.** 85% sinyal diblokir → ~17 trade/bulan/simbol,
-  sekitar 1,7 entry/hari untuk 5 simbol. Dalam sesi testnet 1–2 minggu bisa **nol trade**;
+  sekitar 1,7 entry/hari untuk 5 simbol. Dalam sesi testnet 1-2 minggu bisa **nol trade**;
   itu perilaku normal filter ini, bukan bot rusak.
 - **2 dari 6 blok 52 hari masih negatif.** Filter belum menyelesaikan masalah pasar sideways
   sepenuhnya, hanya menguranginya.
 - **Biaya lebih menentukan daripada parameter.** Pada parameter baru, fee maker 0,02% mengubah
-  +38,7% jadi +70,1%. Tapi bot ini **belum punya jalur order limit/maker** — entry dan exit
+  +38,7% jadi +70,1%. Tapi bot ini **belum punya jalur order limit/maker**, entry dan exit
   memakai MARKET (taker), jadi fee maker butuh pengembangan, bukan sekadar ubah config.
 - Net% adalah penjumlahan persen dari 5 akun 100 USDT terpisah, **bukan compounding**. Risiko
-  nyata per trade p50 1,48% ekuitas; drawdown per simbol 5,7–18,5%.
-- Jangan menaikkan `risk_pct` berdasarkan angka ini. Tetap 1–1,5% sampai testnet 2–4 minggu
+  nyata per trade p50 1,48% ekuitas; drawdown per simbol 5,7-18,5%.
+- Jangan menaikkan `risk_pct` berdasarkan angka ini. Tetap 1-1,5% sampai testnet 2-4 minggu
   sejalan dengan hasil backtest.
 
 Laporan lengkap (grid, walk-forward, per jendela, per simbol, per arah): [`docs/backtest-parameter.md`](docs/backtest-parameter.md).
@@ -912,10 +913,10 @@ Cakupan: pemisahan berkas log per mode (paper, testnet, live) termasuk rotasi di
 - Funding fee ikut dihitung ke batas harian (lebih konservatif). Bila ingin persis mengikuti `pnl_net` bot saja, funding bisa diabaikan dengan mengubah `income_today` di `broker.py`.
 - Batas rugi harian mengandalkan `/fapi/v1/income`, yang hanya menyimpan 3 bulan terakhir dan maksimal 1000 baris per tipe. Untuk akun dengan ratusan trade per hari keduanya cukup, tetapi bila limit tercapai bot menulis peringatan di log dan angka batasnya bisa kurang tepat. Bila endpoint gagal dibaca, bot tetap jalan dengan PnL sesi ini saja dan menulis peringatan `PnL harian exchange gagal dibaca`. Untuk mode paper endpoint ini tidak dipakai (tidak ada exchange).
 - Sinyal mengikuti rumus Pine apa adanya. Tool ini tidak punya filter tren tambahan, jadi di pasar sideways sinyal tetap muncul dan harus disaring manual atau lewat filter orderbook.
-- Bot tidak menangani hedge mode (positionSide). Gunakan one-way mode.
-- Proteksi memakai Algo Order API sehingga `algoId` tidak muncul di endpoint `/fapi/v1/openOrders` biasa. Kalau memeriksa manual lewat web Binance, SL/TP tampil sebagai order kondisional biasa; lewat REST, gunakan `GET /fapi/v1/openAlgoOrders?symbol=`.
+- Bot menolak start bila akun dalam Hedge Mode (`positionSide`); gunakan One-way Mode. Pemeriksaan dilakukan saat preflight lewat `GET /fapi/v1/positionSide/dual`.
+- Proteksi memakai Algo Order API sehingga `algoId` tidak muncul di endpoint `/fapi/v1/openOrders` biasa. Kalau memeriksa manual lewat web Binance, SL/TP tampil sebagai order kondisional biasa; lewat REST, gunakan `GET /fapi/v1/openAlgoOrders?symbol=`. Bot meminta respons `RESULT` dan langsung memverifikasi `algoId`/`clientAlgoId` pada endpoint tersebut.
 - Order algo tidak ikut dibatalkan oleh `DELETE /fapi/v1/allOpenOrders`. Bot memanggil `cancel_all` dan `cancel_all_algo` terpisah.
-- Uji coba live dengan uang nyata belum dilakukan dalam pengerjaan paket ini. Yang sudah diverifikasi: koneksi REST/WebSocket testnet, replay sinyal pada data nyata, seluruh unit test, dan siklus posisi paper.
+- Uji coba live dengan uang nyata belum dilakukan dalam pengerjaan paket ini. Yang sudah diverifikasi: koneksi REST/WebSocket testnet pada host lama, replay sinyal pada data nyata, seluruh unit test, dan siklus posisi paper. Integrasi Algo `RESULT`, `openAlgoOrders`, Hedge Mode, dan pasangan host Demo Trading terhadap exchange nyata belum diuji dari lokasi pengguna; tetap uji dengan kunci testnet berizin terbatas sebelum live.
 
 ---
 
@@ -936,7 +937,7 @@ Cakupan: pemisahan berkas log per mode (paper, testnet, live) termasuk rotasi di
 | Entry ditolak `spread ... > 5.0bps` | Book sedang lebar (berita, jam sepi). Naikkan `orderbook.max_spread_bps` bila ingin tetap entry |
 | Entry ditolak `snapshot orderbook terlalu lama` | `max_age_s` 15 detik terlampaui; aktifkan `orderbook.periodic_snapshot_s` |
 | `-4046 No need to change margin type` | Normal, diabaikan otomatis |
-| WS `DOWN` terus | Jaringan memblokir `wss://fstream.binancefuture.com`; coba `net.proxy`, cek event `ack stream` di level DEBUG |
+| WS `DOWN` terus | Jaringan memblokir host WebSocket testnet; coba `net.proxy`, atau ganti ke pasangan `wss://demo-fstream.binance.com` bila REST Demo Trading juga dipakai dan dapat dijangkau; cek event `ack stream` di level DEBUG |
 | Dashboard berisi kode escape di Windows | Terminal tidak mendukung VT; pakai Windows Terminal atau jalankan dengan `--no-dashboard` |
 | `config error` untuk `NaN`/`Infinity` | JSON tidak boleh memuat konstanta non-finite, pakai angka biasa |
 | `-4131` muncul setelah restart | Dulu SL pengganti bisa dihitung dari entry sehingga jatuh di sisi harga yang salah. Sekarang SL pengganti dihitung dari harga sekarang; kalau masih muncul, periksa log `adopt` untuk simbol tersebut |
@@ -956,13 +957,13 @@ Bot ini mengirim order nyata bila dijalankan dengan `--live`. Semua keputusan tr
 
 ## 19. Sumber dokumentasi
 
-Diambil pada 2026-11-16:
+Diambil dan diverifikasi pada 2026-11-19 (Asia/Jakarta):
 
-- [Binance USD-M Futures General Info](https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info): parameter GET wajib di query string, POST/PUT/DELETE boleh di query string atau body `application/x-www-form-urlencoded`, penanganan HTTP 429/5xx, dan URL testnet baru. Bot memilih query string untuk semua request bertanda tangan.
+- [Binance USD-M Futures General Info](https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info): parameter GET wajib di query string, POST/PUT/DELETE boleh di query string atau body `application/x-www-form-urlencoded`, penanganan HTTP 429/5xx, dan URL Demo Trading baru. Bot memilih query string untuk semua request bertanda tangan, mematikan redirect, serta membatasi host ke allowlist. Config bawaan tetap memakai pasangan testnet lama sesuai penjelasan bagian 4.
 - [Binance User Data Streams](https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Start-User-Data-Stream): `POST`/`PUT`/`DELETE /fapi/v1/listenKey` hanya butuh header `X-MBX-APIKEY`, stream kedaluwarsa setelah 60 menit.
 - [Binance New Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api): aturan `newClientOrderId`, `reduceOnly`, dan `newOrderRespType` untuk order market entry.
-- [Binance New Algo Order / Query / Cancel](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order): `algoType=CONDITIONAL`, `triggerPrice`, `clientAlgoId`, `workingType`, `closePosition`, respons `algoId`/`algoStatus`/`actualOrderId`.
+- [Binance New Algo Order / Query / Cancel](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order): `algoType=CONDITIONAL`, `triggerPrice`, `clientAlgoId`, `workingType`, `closePosition`, respons `algoId`/`algoStatus`/`actualOrderId`; `positionSide` wajib di Hedge Mode dan `reduceOnly` tidak boleh dipakai di sana. Bot menolak Hedge Mode, memakai `reduceOnly` pada One-way Mode, meminta `newOrderRespType=RESULT`, lalu verifikasi `openAlgoOrders`.
 - [Binance Get Income History](https://developers.binance.com/docs/derivatives/usds-margined-futures/account/rest-api/Get-Income-History): `GET /fapi/v1/income` dengan `incomeType` `REALIZED_PNL`/`COMMISSION`, rentang `startTime`/`endTime`, `limit` maksimal 1000, weight 100, hanya 3 bulan terakhir. Dipakai sebagai dasar batas rugi harian yang tahan restart.
 - [Binance Current All Algo Open Orders](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Current-All-Algo-Open-Orders): parameter `symbol`/`algoType`, weight 1 dengan `symbol` dan 40 tanpa `symbol`.
 - [TradingView Pine Script v4 Reference, `ema()`](https://www.tradingview.com/pine-script-reference/v4/#fun_ema): implementasi referensi memakai seed SMA, sesuai `indicators.EMA` di bot ini.
-- [PyPI JSON API](https://pypi.org/pypi/requests/json) dan [websocket-client](https://pypi.org/pypi/websocket-client/json): versi `requests` 2.34.2 dan `websocket-client` 1.9.2.
+- [PyPI JSON API](https://pypi.org/pypi/requests/json), [websocket-client](https://pypi.org/pypi/websocket-client/json), dan [PySocks](https://pypi.org/pypi/PySocks/json): versi `requests` 2.34.2, `websocket-client` 1.9.2, dan `PySocks` 1.7.1.

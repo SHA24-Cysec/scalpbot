@@ -91,6 +91,14 @@ class TestTickSnapping(unittest.TestCase):
                 self.params = params
                 return {"algoId": 7}
 
+            def open_algo_orders(self, symbol=None):
+                return [{
+                    "algoId": 7,
+                    "clientAlgoId": (self.params or {}).get("clientAlgoId"),
+                    "algoStatus": "NEW",
+                    "symbol": (self.params or {}).get("symbol"),
+                }]
+
             def filters(self, symbol):
                 return filters(tick=0.01)
 
@@ -108,6 +116,14 @@ class TestTickSnapping(unittest.TestCase):
             def new_algo_order(self, **params):
                 self.params = params
                 return {"algoId": 8}
+
+            def open_algo_orders(self, symbol=None):
+                return [{
+                    "algoId": 8,
+                    "clientAlgoId": (self.params or {}).get("clientAlgoId"),
+                    "algoStatus": "NEW",
+                    "symbol": (self.params or {}).get("symbol"),
+                }]
 
             def filters(self, symbol):
                 return filters(tick=0.01)
@@ -163,6 +179,13 @@ class StubBroker:
 
     def cancel(self, symbol, order_id):
         return None
+
+    def cancel_all(self, symbol):
+        return None
+
+    def emergency_close(self, *args, **kwargs):
+        from scalpbot.broker import Fill
+        return Fill(order_id="em", avg_price=100.0, qty=1.0, ts=time.time())
 
 
 def make_trader(broker, cfg=None):
@@ -267,6 +290,14 @@ class TestBreakEvenSnapping(unittest.TestCase):
             def new_algo_order(self, **params):
                 self.params = params
                 return {"algoId": 5}
+
+            def open_algo_orders(self, symbol=None):
+                return [{
+                    "algoId": 5,
+                    "clientAlgoId": (self.params or {}).get("clientAlgoId"),
+                    "algoStatus": "NEW",
+                    "symbol": (self.params or {}).get("symbol"),
+                }]
 
             def filters(self, symbol):
                 return filters(tick=0.01)

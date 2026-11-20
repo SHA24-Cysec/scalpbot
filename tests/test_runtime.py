@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from scalpbot.app import WsThread, open_bar_start_ms, ws_proxy_kwargs
-from scalpbot.config import Config
+from scalpbot.config import Config, ConfigError
 
 
 class FakeWs:
@@ -64,12 +64,15 @@ class TestHelpers(unittest.TestCase):
 
     def test_proxy_kwargs(self):
         self.assertEqual(ws_proxy_kwargs(""), {})
-        kwargs = ws_proxy_kwargs("http://user:pass@127.0.0.1:8080")
+        kwargs = ws_proxy_kwargs("http://user:p%40ss@127.0.0.1:8080")
         self.assertEqual(kwargs["http_proxy_host"], "127.0.0.1")
         self.assertEqual(kwargs["http_proxy_port"], 8080)
-        self.assertEqual(kwargs["http_proxy_auth"], ("user", "pass"))
+        self.assertEqual(kwargs["http_proxy_auth"], ("user", "p@ss"))
         self.assertEqual(kwargs["proxy_type"], "http")
-        self.assertEqual(ws_proxy_kwargs("ftp://host"), {})
+        with self.assertRaises(ConfigError):
+            ws_proxy_kwargs("ftp://host")
+        with self.assertRaises(ConfigError):
+            ws_proxy_kwargs("http://host:99999")
 
     def test_market_ticks_are_throttled(self):
         from scalpbot.app import ScalpBotApp

@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
+from .security import ensure_private_dir, ensure_private_file
 from .timeutil import monotonic_stamp
 
 log = logging.getLogger("scalpbot.state")
@@ -32,6 +33,16 @@ def _finite(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return out if math.isfinite(out) else default
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0.0
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 class StateStore:
@@ -56,12 +67,15 @@ class StateStore:
             log.warning("state tidak terbaca: %s", exc)
             return {}
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
+            data = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+        except (json.JSONDecodeError, ValueError) as exc:
             # Berkas rusak (mis. mati saat menulis): sisihkan, jangan hapus.
             bad = self.path.with_suffix(self.path.suffix + ".corrupt")
             try:
+                if bad.exists():
+                    bad.unlink()
                 self.path.replace(bad)
+                ensure_private_file(bad)
             except OSError:
                 pass
             self.last_error = f"state rusak: {exc}"
@@ -81,23 +95,28 @@ class StateStore:
         payload = dict(data)
         payload["version"] = VERSION
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(self.path.parent)
             fd, tmp = tempfile.mkstemp(
                 prefix=self.path.name + ".", suffix=".tmp", dir=str(self.path.parent)
             )
             try:
+                os.fchmod(fd, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
+                    json.dump(
+                        _json_safe(payload), fh,
+                        ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+                    )
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.replace(tmp, self.path)
+                ensure_private_file(self.path)
             except BaseException:
                 try:
                     os.unlink(tmp)
                 except OSError:
                     pass
                 raise
-        except OSError as exc:
+        except (OSError, ValueError, TypeError) as exc:
             self.last_error = str(exc)
             log.warning("state gagal ditulis: %s", exc)
             return False

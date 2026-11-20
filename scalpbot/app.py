@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import itertools
 import json
 import logging
-import logging.handlers
 import math
 import signal
 import threading
@@ -14,12 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote
 
 import websocket
 
 from .broker import PaperBroker, TestnetBroker
-from .config import Config, confirmation_from_env
+from .config import SYMBOL_RE, Config, ConfigError, assert_mode_hosts, confirmation_from_env
 from .dashboard import Dashboard
 from .discovery import Selection, select_symbols
 from .events import Event, EventLog, EventLogHandler
@@ -30,6 +28,15 @@ from .indicators import Candle
 from .netinfo import IpDetector
 from .orderbook import OrderbookFilter
 from .risk import SymbolFilters
+from .security import (
+    PrivateRotatingFileHandler,
+    RedactingFormatter,
+    clean_message,
+    ensure_private_dir,
+    parse_proxy,
+    safe_print as print,
+    validate_listen_key,
+)
 from .strategy import ScalpPullbackStrategy
 from .trader import Trader
 
@@ -50,23 +57,22 @@ def open_bar_start_ms(now_ms: int, interval_seconds: int) -> int:
 def ws_proxy_kwargs(proxy: str) -> dict[str, Any]:
     if not proxy:
         return {}
-    raw = proxy if "://" in proxy else f"http://{proxy}"
-    parsed = urlparse(raw)
-    if not parsed.hostname:
-        return {}
-    scheme = (parsed.scheme or "http").lower()
-    if scheme not in {"http", "https", "socks5", "socks5h"}:
-        return {}
-    proxy_type = "socks5" if scheme.startswith("socks5") else "http"
-    if proxy_type == "socks5" and importlib.util.find_spec("socks") is None:
-        return {}
+    try:
+        info = parse_proxy(proxy)
+    except ValueError as exc:
+        raise ConfigError(f"net.proxy tidak valid: {exc}") from exc
+    if info["type"] == "socks5":
+        try:
+            import socks  # noqa: F401
+        except ImportError as exc:
+            raise ConfigError("proxy SOCKS5 butuh PySocks; install requirements.txt") from exc
     kwargs: dict[str, Any] = {
-        "http_proxy_host": parsed.hostname,
-        "http_proxy_port": parsed.port or (1080 if proxy_type == "socks5" else 80),
-        "proxy_type": proxy_type,
+        "http_proxy_host": info["host"],
+        "http_proxy_port": info["port"],
+        "proxy_type": info["type"],
     }
-    if parsed.username:
-        kwargs["http_proxy_auth"] = (parsed.username, parsed.password or "")
+    if info["username"]:
+        kwargs["http_proxy_auth"] = (info["username"], info["password"])
     return kwargs
 
 
@@ -129,8 +135,8 @@ class WsThread(threading.Thread):
         if ws:
             try:
                 ws.close()
-            except Exception:
-                pass
+            except (OSError, RuntimeError, AttributeError, websocket.WebSocketException) as exc:
+                log.debug("%s close gagal: %s", self.name, exc)
 
     def _clear_commands(self) -> None:
         while True:
@@ -172,7 +178,6 @@ class WsThread(threading.Thread):
                 ws.run_forever(
                     ping_interval=self._ping_interval,
                     ping_timeout=10,
-                    skip_utf8_validation=True,
                     **self._proxy_kwargs,
                 )
             except Exception as exc:
@@ -233,6 +238,7 @@ class SymbolRuntime:
 
 class ScalpBotApp:
     def __init__(self, cfg: Config, paper_balance: float = 50.0) -> None:
+        assert_mode_hosts(cfg)
         self.cfg = cfg
         self.dashboard = Dashboard(
             cfg.dashboard, live=cfg.mode == "live", timezone_name=cfg.logging.timezone
@@ -255,7 +261,12 @@ class ScalpBotApp:
         self.trader: Optional[Trader] = None
         self.state_file = ""
         self.book: Optional[OrderbookFilter] = None
-        self.ip = IpDetector(cfg.net.ip_url, cfg.net.ip_check_interval_s, cfg.net.proxy)
+        self.ip = IpDetector(
+            cfg.net.ip_url,
+            cfg.net.ip_check_interval_s,
+            cfg.net.proxy,
+            fallback=cfg.net.ip_fallback,
+        )
         self.started_at = time.time()
         self._queue: Optional[asyncio.Queue[tuple[str, Any]]] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -281,7 +292,7 @@ class ScalpBotApp:
         for h in list(root.handlers):
             root.removeHandler(h)
             h.close()
-        fmt = logging.Formatter(
+        fmt = RedactingFormatter(
             "%(asctime)s " + f"[{self.cfg.mode.upper()}] " + "%(levelname)-7s %(name)s | %(message)s",
             "%H:%M:%S",
         )
@@ -294,8 +305,8 @@ class ScalpBotApp:
         self._file_log.setLevel(logging.INFO)
         if self.log_file:
             path = Path(self.log_file)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fh = logging.handlers.RotatingFileHandler(
+            ensure_private_dir(path.parent)
+            fh = PrivateRotatingFileHandler(
                 path,
                 maxBytes=max(1024, self.cfg.logging.max_bytes),
                 backupCount=max(0, self.cfg.logging.backups),
@@ -343,6 +354,13 @@ class ScalpBotApp:
 
     def preflight(self) -> None:
         self.client.sync_time()
+        if self.cfg.mode != "paper" and self.client.position_side_dual():
+            raise BinanceError(
+                -1,
+                "akun memakai Hedge Mode; bot hanya mendukung One-way Mode",
+                0,
+                "/fapi/v1/positionSide/dual",
+            )
         self.filters = self.client.load_all_filters()
         if self.cfg.market.discovery == "top_volume":
             equity = self._discovery_equity()
@@ -559,15 +577,22 @@ class ScalpBotApp:
             self._refresh_listen_key()
             self._user_ws = WsThread(
                 "user-ws",
-                url_provider=lambda: (
-                    f"{self.cfg.ws_url()}/ws/{self._listen_key}" if self._listen_key else None
-                ),
+                url_provider=lambda: self._user_stream_url(),
                 on_message=lambda p: self._push("user", p),
                 on_error=lambda m: self._push("wserr", m),
                 on_connect=lambda: self._push("wsopen", "user"),
                 proxy=self.cfg.net.proxy,
             )
             self._user_ws.start()
+
+    def _user_stream_url(self) -> str | None:
+        if not self._listen_key:
+            return None
+        try:
+            key = validate_listen_key(self._listen_key)
+        except ValueError:
+            return None
+        return f"{self.cfg.ws_url()}/ws/{quote(key, safe='')}"
 
     def _refresh_listen_key(self) -> None:
         try:
@@ -702,11 +727,20 @@ class ScalpBotApp:
         )
         self._update_kline_subscriptions()
 
+    def _known_symbol(self, raw: Any) -> str | None:
+        symbol = clean_message(str(raw or "")).upper()
+        if not SYMBOL_RE.fullmatch(symbol):
+            return None
+        with self._universe_lock:
+            return symbol if symbol in self.symbols else None
+
     async def _handle_kline(self, payload: dict) -> None:
         k = payload.get("k") or {}
         if not k or self.trader is None:
             return
-        symbol = str(payload.get("s", "")).upper()
+        symbol = self._known_symbol(payload.get("s"))
+        if symbol is None:
+            return
         with self._universe_lock:
             rt = self.symbols.get(symbol)
         if rt is None:
@@ -759,7 +793,9 @@ class ScalpBotApp:
     async def _handle_mark(self, payload: dict) -> None:
         if self.trader is None:
             return
-        symbol = str(payload.get("s", "")).upper()
+        symbol = self._known_symbol(payload.get("s"))
+        if symbol is None:
+            return
         with self._universe_lock:
             rt = self.symbols.get(symbol)
         if rt is None:
@@ -770,14 +806,17 @@ class ScalpBotApp:
             rt.last_price = price
 
     async def _handle_user(self, payload: dict) -> None:
-        if self.trader is None:
+        if self.trader is None or not isinstance(payload, dict):
             return
-        event = payload.get("e")
+        event = clean_message(str(payload.get("e") or ""))
         if event == "ORDER_TRADE_UPDATE":
-            o = payload.get("o") or {}
-            status = o.get("X")
-            otype = o.get("ot") or o.get("o")
-            sym = str(o.get("s", "")).upper()
+            raw_o = payload.get("o")
+            o = raw_o if isinstance(raw_o, dict) else {}
+            status = clean_message(str(o.get("X") or ""))
+            otype = clean_message(str(o.get("ot") or o.get("o") or ""))
+            sym = self._known_symbol(o.get("s"))
+            if sym is None:
+                return
             if status == "FILLED" and otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"):
                 fill_price = safe_float(o.get("ap"), 0.0)
                 if fill_price > 0:
@@ -791,12 +830,13 @@ class ScalpBotApp:
             elif status in ("CANCELED", "EXPIRED", "REJECTED"):
                 self.events.add("WARNING", "fill", f"{sym} {otype} {status}: {o.get('r')}")
         elif event == "ALGO_UPDATE":
-            o = payload.get("o") if isinstance(payload.get("o"), dict) else payload
-            sym = str(o.get("s") or payload.get("s") or "").upper()
-            status = str(o.get("X") or "")
-            otype = str(o.get("o") or o.get("orderType") or "")
-            if not sym:
+            raw_o = payload.get("o")
+            o = raw_o if isinstance(raw_o, dict) else payload
+            sym = self._known_symbol(o.get("s") or payload.get("s"))
+            if sym is None:
                 return
+            status = clean_message(str(o.get("X") or ""))
+            otype = clean_message(str(o.get("o") or o.get("orderType") or ""))
             if status == "TRIGGERING":
                 self.events.add("INFO", "algo", f"{sym} {otype} trigger, menunggu eksekusi")
             elif status == "FINISHED":
@@ -826,6 +866,9 @@ class ScalpBotApp:
             except (asyncio.TimeoutError, TimeoutError):
                 continue
             try:
+                if kind in ("market", "user") and not isinstance(payload, dict):
+                    self.events.add("WARNING", "ws", f"payload {kind} bukan objek, diabaikan")
+                    continue
                 if kind == "market":
                     ev = payload.get("e")
                     if ev == "kline":
@@ -1021,8 +1064,10 @@ class ScalpBotApp:
             ",".join(self.cfg.market.symbols) or "-",
             self.events_file,
         )
-        if self.cfg.mode == "live" and not confirmation_from_env():
-            self.events.add("ERROR", "boot", "live butuh SCALPBOT_LIVE_CONFIRM=YES-LIVE")
+        if self.cfg.mode == "live" and not (
+            getattr(self.cfg, "live_authorized", False) or confirmation_from_env()
+        ):
+            self.events.add("ERROR", "boot", "live butuh --live dan konfirmasi eksplisit")
             return 2
         if self.cfg.net.ip_check:
             self.ip.start()

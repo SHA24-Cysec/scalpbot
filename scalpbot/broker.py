@@ -11,9 +11,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from .config import Config
+from .config import SYMBOL_RE, Config
 from .exchange import BinanceError, BinanceFuturesClient
 from .risk import SymbolFilters, round_tick
+from .security import clean_message
 
 log = logging.getLogger(__name__)
 
@@ -124,7 +125,27 @@ class TestnetBroker:
             raise BinanceError(-1, f"respons algo {symbol} tanpa algoId: {data}", 0, "/fapi/v1/algoOrder")
         return algo_id
 
+    def _verify_algo(self, symbol: str, algo_id: str, client_id: str) -> None:
+        try:
+            rows = self.client.open_algo_orders(symbol)
+        except (BinanceError, AttributeError, TypeError) as exc:
+            raise BinanceError(
+                -1, f"verifikasi algo {algo_id} gagal: {exc}", 0, "/fapi/v1/openAlgoOrders"
+            ) from exc
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            same = str(row.get("algoId", "")) == algo_id or str(row.get("clientAlgoId", "")) == client_id
+            if not same:
+                continue
+            status = clean_message(str(row.get("algoStatus", "NEW"))).upper()
+            if status not in {"NEW", "TRIGGERING", "ACTIVE", "WORKING"}:
+                raise BinanceError(-1, f"algo {algo_id} status {status}", 0, "/fapi/v1/openAlgoOrders")
+            return
+        raise BinanceError(-1, f"algo {algo_id} tidak ditemukan", 0, "/fapi/v1/openAlgoOrders")
+
     def _algo_stop(self, symbol: str, exit_side: str, qty: float, stop: float, tag: str) -> str:
+        client_id = self.ids.make(tag + "sl")
         data = self.client.new_algo_order(
             symbol=symbol,
             side=exit_side,
@@ -133,11 +154,15 @@ class TestnetBroker:
             triggerPrice=stop,
             reduceOnly="true",
             workingType=self.cfg.execution.working_type,
-            clientAlgoId=self.ids.make(tag + "sl"),
+            clientAlgoId=client_id,
+            newOrderRespType="RESULT",
         )
-        return self._algo_id(data, symbol)
+        algo_id = self._algo_id(data, symbol)
+        self._verify_algo(symbol, algo_id, client_id)
+        return algo_id
 
     def _algo_tp(self, symbol: str, exit_side: str, qty: float, target: float, tag: str) -> str:
+        client_id = self.ids.make(tag + "tp")
         data = self.client.new_algo_order(
             symbol=symbol,
             side=exit_side,
@@ -146,9 +171,12 @@ class TestnetBroker:
             triggerPrice=target,
             reduceOnly="true",
             workingType=self.cfg.execution.working_type,
-            clientAlgoId=self.ids.make(tag + "tp"),
+            clientAlgoId=client_id,
+            newOrderRespType="RESULT",
         )
-        return self._algo_id(data, symbol)
+        algo_id = self._algo_id(data, symbol)
+        self._verify_algo(symbol, algo_id, client_id)
+        return algo_id
 
     def _snap(self, symbol: str, price: float, toward: str) -> float:
         """Bulatkan trigger ke kelipatan tick; arah pembulatan memperlebar jarak dari harga pasar."""
@@ -212,6 +240,8 @@ class TestnetBroker:
         except (BinanceError, AttributeError):
             return None
         for order in orders:
+            if not isinstance(order, dict):
+                continue
             if order.get("orderType") in ("STOP_MARKET", "STOP") and order.get("side") == wanted:
                 try:
                     value = float(order.get("triggerPrice", 0) or 0)
@@ -250,10 +280,90 @@ class TestnetBroker:
         avg = float(data.get("avgPrice") or 0.0)
         if avg <= 0 or not math.isfinite(avg):
             avg = self._avg_from_order(symbol, cid)
-        filled = float(data.get("executedQty") or 0.0)
+        try:
+            filled = float(data.get("executedQty") or 0.0)
+        except (TypeError, ValueError):
+            filled = 0.0
         if not math.isfinite(filled) or filled <= 0:
-            filled = qty
+            recovered = self._recover_fill(symbol, cid, qty)
+            if recovered is None:
+                raise BinanceError(
+                    -1,
+                    f"close {symbol} tidak terisi (executedQty={data.get('executedQty')!r})",
+                    0,
+                    "/fapi/v1/order",
+                )
+            return recovered
         return Fill(order_id=str(data.get("orderId", cid)), avg_price=avg, qty=filled, ts=time.time())
+
+    def emergency_close(
+        self, symbol: str, side: str, qty: float, tag: str, position_key: str | None = None
+    ) -> Fill:
+        last_exc: Exception | None = None
+        remaining = qty
+        for attempt in range(3):
+            for use_close_position in (False, True):
+                try:
+                    if use_close_position:
+                        fill = self._close_position_flag(symbol, side, tag, attempt)
+                    else:
+                        fill = self.close_market(symbol, side, remaining, f"{tag}em{attempt}", position_key)
+                    if not math.isfinite(fill.qty) or fill.qty <= 0:
+                        raise BinanceError(-1, "fill close darurat kosong", 0, "/fapi/v1/order")
+                    remaining = self._remaining_qty(symbol)
+                    if remaining <= 1e-9:
+                        return fill
+                    last_exc = BinanceError(
+                        -1, f"sisa posisi {remaining:g} setelah close", 0, "/fapi/v3/positionRisk"
+                    )
+                except BinanceError as exc:
+                    last_exc = exc
+            time.sleep(0.25 * (attempt + 1))
+        raise BinanceError(
+            -1,
+            f"close darurat {symbol} gagal setelah 3 percobaan: {last_exc}",
+            0,
+            "/fapi/v1/order",
+        )
+
+    def _close_position_flag(self, symbol: str, side: str, tag: str, attempt: int) -> Fill:
+        cid = self.ids.make(f"{tag}cp{attempt}")
+        data = self.client.new_order(
+            symbol=symbol,
+            side="SELL" if side == "LONG" else "BUY",
+            type="MARKET",
+            closePosition="true",
+            newClientOrderId=cid,
+            newOrderRespType="RESULT",
+        )
+        try:
+            filled = float(data.get("executedQty") or 0.0)
+        except (TypeError, ValueError):
+            filled = 0.0
+        if not math.isfinite(filled) or filled <= 0:
+            recovered = self._recover_fill(symbol, cid, 0.0)
+            if recovered is None:
+                raise BinanceError(-1, "closePosition tidak terisi", 0, "/fapi/v1/order")
+            return recovered
+        avg = float(data.get("avgPrice") or 0.0)
+        return Fill(order_id=str(data.get("orderId", cid)), avg_price=avg, qty=filled, ts=time.time())
+
+    def _remaining_qty(self, symbol: str) -> float:
+        try:
+            rows = self.client.position_risk(symbol)
+        except (BinanceError, AttributeError, TypeError) as exc:
+            raise BinanceError(
+                -1, f"verifikasi posisi gagal: {exc}", 0, "/fapi/v3/positionRisk"
+            ) from exc
+        total = 0.0
+        for row in rows:
+            if not isinstance(row, dict) or row.get("symbol") != symbol:
+                continue
+            try:
+                total += abs(float(row.get("positionAmt", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        return total
 
     def cancel_all(self, symbol: str) -> None:
         for call in (self.client.cancel_all, self.client.cancel_all_algo):
@@ -288,7 +398,10 @@ class TestnetBroker:
                 except (TypeError, ValueError):
                     continue
                 subtotal += value
-                symbol = str(row.get("symbol") or "OTHER")
+                raw_symbol = row.get("symbol")
+                symbol = clean_message(str(raw_symbol)).upper() if raw_symbol else "OTHER"
+                if not SYMBOL_RE.fullmatch(symbol):
+                    symbol = "OTHER"
                 by_symbol[symbol] = by_symbol.get(symbol, 0.0) + value
             kinds[kind] = subtotal
         return {
@@ -304,7 +417,7 @@ class TestnetBroker:
     def income_today(self) -> Optional[dict]:
         """Rincian PnL versi Binance untuk hari exchange UTC (00:00 UTC).
 
-        Ini **bukan** dasar batas rugi harian — batas itu memakai hari bot (WIB) lewat
+        Ini **bukan** dasar batas rugi harian, batas itu memakai hari bot (WIB) lewat
         `realized_since`. Angka di sini dipakai `pnl` supaya cocok dengan aplikasi
         Binance, yang memang memotong hari pada 00:00 UTC.
         """
@@ -345,7 +458,9 @@ class TestnetBroker:
     def open_protection(self, symbol: str) -> list[dict]:
         rows: list[dict] = []
         for order in self.client.open_algo_orders(symbol):
-            kind = str(order.get("orderType", ""))
+            if not isinstance(order, dict):
+                continue
+            kind = clean_message(str(order.get("orderType", "")))
             if kind not in ("STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
                 continue
             try:
@@ -354,12 +469,12 @@ class TestnetBroker:
                 trigger = 0.0
             rows.append(
                 {
-                    "id": str(order.get("algoId") or ""),
+                    "id": clean_message(str(order.get("algoId") or "")),
                     "type": kind,
-                    "side": str(order.get("side", "")),
+                    "side": clean_message(str(order.get("side", ""))),
                     "trigger": trigger,
                     "qty": float(order.get("quantity", 0) or 0) or 0.0,
-                    "status": str(order.get("algoStatus", "")),
+                    "status": clean_message(str(order.get("algoStatus", ""))),
                 }
             )
         return rows
@@ -371,9 +486,14 @@ class TestnetBroker:
         rows = self.client.position_risk()
         out: dict[str, dict] = {}
         for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").upper()
+            if not SYMBOL_RE.fullmatch(symbol):
+                continue
             amt = float(row.get("positionAmt", 0) or 0)
             if amt != 0:
-                out[row["symbol"]] = {
+                out[symbol] = {
                     "qty": abs(amt),
                     "entry": float(row.get("entryPrice", 0) or 0),
                     "side": "LONG" if amt > 0 else "SHORT",
@@ -490,6 +610,16 @@ class PaperBroker:
             self.fees += fee
             self.realized += gross - fee
         return Fill(order_id=self._next_id(), avg_price=fill, qty=qty, ts=time.time(), fee=fee)
+
+    def emergency_close(
+        self, symbol: str, side: str, qty: float, tag: str, position_key: str | None = None
+    ) -> Fill:
+        fill = self.close_market(symbol, side, qty, tag, position_key=position_key)
+        with self._lock:
+            still_open = any(pos["symbol"] == symbol for pos in self._positions.values())
+        if still_open:
+            raise BinanceError(-1, f"posisi paper {symbol} masih terbuka", 0, "paper")
+        return fill
 
     def mark(self, symbol: str, price: float) -> None:
         if not math.isfinite(price) or price <= 0:

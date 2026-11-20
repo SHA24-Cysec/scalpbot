@@ -88,6 +88,7 @@
     "ip_check": true,
     "ip_check_interval_s": 600,
     "ip_url": "https://api.ipify.org",
+    "ip_fallback": false,
     "proxy": ""
   },
   "dashboard": {
