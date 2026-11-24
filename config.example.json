@@ -13,15 +13,18 @@
   },
   "market": {
     "symbols": [
-      "BTCUSDT",
-      "ETHUSDT",
-      "SOLUSDT",
-      "XRPUSDT",
-      "DOGEUSDT"
+      "ADAUSDT",
+      "ENAUSDT",
+      "AKEUSDT",
+      "SUIUSDT",
+      "ARIAUSDT",
+      "DOGEUSDT",
+      "ACEUSDT",
+      "1000PEPEUSDT"
     ],
     "interval": "5m",
     "warmup_bars": 1000,
-    "discovery": "top_volume",
+    "discovery": "static",
     "discovery_top_n": 5,
     "discovery_refresh_s": 1800,
     "discovery_quote_volume_min": 50000000.0,
